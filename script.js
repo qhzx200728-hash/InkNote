@@ -13,9 +13,23 @@
 // ==========================================
 // 1. Cấu hình trang giấy cố định & Camera
 // ==========================================
+const PAGE_PORTRAIT_WIDTH = 1200;
+const PAGE_PORTRAIT_HEIGHT = 1700;
+const PAGE_LANDSCAPE_WIDTH = 1700;
+const PAGE_LANDSCAPE_HEIGHT = 1200;
+
+// Dự phòng tương thích
 const PAGE_WIDTH = 1200;
 const PAGE_HEIGHT = 1700;
 const ERASER_RADIUS_SCREEN = 10;
+
+function getPageDimensions(config = pageConfig) {
+  const orientation = (config && config.orientation) || 'portrait';
+  if (orientation === 'landscape') {
+    return { width: PAGE_LANDSCAPE_WIDTH, height: PAGE_LANDSCAPE_HEIGHT };
+  }
+  return { width: PAGE_PORTRAIT_WIDTH, height: PAGE_PORTRAIT_HEIGHT };
+}
 
 const BACKGROUND_COLORS = {
   white: '#ffffff',
@@ -45,9 +59,10 @@ function createNewPageObject(inheritedConfig = null) {
   return {
     id: 'page_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
     config: {
-      background: inheritedConfig ? inheritedConfig.background : 'white',
-      pattern: inheritedConfig ? inheritedConfig.pattern : 'none',
-      spacing: inheritedConfig ? inheritedConfig.spacing : 'medium'
+      background: inheritedConfig ? (inheritedConfig.background || 'white') : 'white',
+      pattern: inheritedConfig ? (inheritedConfig.pattern || 'none') : 'none',
+      spacing: inheritedConfig ? (inheritedConfig.spacing || 'medium') : 'medium',
+      orientation: inheritedConfig ? (inheritedConfig.orientation || 'portrait') : 'portrait'
     },
     strokes: [],
     view: {
@@ -701,7 +716,8 @@ async function openNote(noteId) {
       config: {
         background: p.config?.background || 'white',
         pattern: p.config?.pattern || 'none',
-        spacing: p.config?.spacing || 'medium'
+        spacing: p.config?.spacing || 'medium',
+        orientation: p.config?.orientation || 'portrait'
       },
       strokes: (p.strokes || []).map(s => {
         s.aabb = computeStrokeAABB(s);
@@ -775,6 +791,7 @@ function loadActivePageState() {
   if (!p) return;
 
   pageConfig = { ...p.config };
+  if (!pageConfig.orientation) pageConfig.orientation = 'portrait';
 
   strokes = [];
   for (const s of p.strokes) {
@@ -864,11 +881,13 @@ function drawThumbnailCanvas(thumbCanvas, page) {
   tCtx.setTransform(1, 0, 0, 1, 0, 0);
   tCtx.clearRect(0, 0, thumbCanvas.width, thumbCanvas.height);
 
-  tCtx.scale(thumbCanvas.width / PAGE_WIDTH, thumbCanvas.height / PAGE_HEIGHT);
+  const { width: pWidth, height: pHeight } = getPageDimensions(page.config);
+
+  tCtx.scale(thumbCanvas.width / pWidth, thumbCanvas.height / pHeight);
 
   const bg = BACKGROUND_COLORS[page.config.background] || '#ffffff';
   tCtx.fillStyle = bg;
-  tCtx.fillRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
+  tCtx.fillRect(0, 0, pWidth, pHeight);
 
   if (page.config.pattern !== 'none') {
     const isDark = page.config.background === 'dark';
@@ -878,27 +897,33 @@ function drawThumbnailCanvas(thumbCanvas, page) {
 
     if (page.config.pattern === 'ruled') {
       const step = SPACING_SIZES.ruled[page.config.spacing] || 50;
-      for (let y = 80; y < PAGE_HEIGHT - 30; y += step) {
+      for (let y = 80; y < pHeight - 30; y += step) {
         tCtx.moveTo(0, y);
-        tCtx.lineTo(PAGE_WIDTH, y);
+        tCtx.lineTo(pWidth, y);
       }
     } else if (page.config.pattern === 'grid') {
       const step = SPACING_SIZES.grid[page.config.spacing] || 45;
-      for (let x = step; x < PAGE_WIDTH; x += step) {
+      for (let x = step; x < pWidth; x += step) {
         tCtx.moveTo(x, 0);
-        tCtx.lineTo(x, PAGE_HEIGHT);
+        tCtx.lineTo(x, pHeight);
       }
-      for (let y = step; y < PAGE_HEIGHT; y += step) {
+      for (let y = step; y < pHeight; y += step) {
         tCtx.moveTo(0, y);
-        tCtx.lineTo(PAGE_WIDTH, y);
+        tCtx.lineTo(pWidth, y);
       }
     }
     tCtx.stroke();
   }
 
+  tCtx.save();
+  tCtx.beginPath();
+  tCtx.rect(0, 0, pWidth, pHeight);
+  tCtx.clip();
+
   for (let i = 0; i < page.strokes.length; i++) {
     drawStroke(tCtx, page.strokes[i]);
   }
+  tCtx.restore();
 
   tCtx.restore();
 }
@@ -907,8 +932,15 @@ function updateCurrentPageThumbnail() {
   saveActivePageState();
   const currentItem = document.querySelector(`.thumbnail-item[data-index="${currentPageIndex}"]`);
   if (currentItem) {
+    const isLandscape = (pageConfig.orientation || 'portrait') === 'landscape';
+    const card = currentItem.querySelector('.thumbnail-card');
+    if (card) {
+      card.className = `thumbnail-card ${isLandscape ? 'landscape' : 'portrait'}`;
+    }
     const thumbCanvas = currentItem.querySelector('.thumb-canvas');
     if (thumbCanvas) {
+      thumbCanvas.width = isLandscape ? 170 : 120;
+      thumbCanvas.height = isLandscape ? 120 : 170;
       drawThumbnailCanvas(thumbCanvas, pages[currentPageIndex]);
     }
   }
@@ -931,13 +963,15 @@ function renderSidebar() {
     item.setAttribute('data-index', idx);
     item.setAttribute('draggable', 'true');
 
+    const isLandscape = (page.config.orientation || 'portrait') === 'landscape';
+
     const card = document.createElement('div');
-    card.className = 'thumbnail-card';
+    card.className = `thumbnail-card ${isLandscape ? 'landscape' : 'portrait'}`;
 
     const thumbCanvas = document.createElement('canvas');
     thumbCanvas.className = 'thumb-canvas';
-    thumbCanvas.width = 120;
-    thumbCanvas.height = 170;
+    thumbCanvas.width = isLandscape ? 170 : 120;
+    thumbCanvas.height = isLandscape ? 120 : 170;
     card.appendChild(thumbCanvas);
 
     const badge = document.createElement('span');
@@ -1021,9 +1055,10 @@ function getPaperPoint(e) {
 function centerPage(targetZoom = 1.0) {
   zoom = targetZoom;
   const rect = canvas.getBoundingClientRect();
-  panX = (rect.width - PAGE_WIDTH * zoom) / 2;
-  panY = rect.height > PAGE_HEIGHT * zoom
-    ? (rect.height - PAGE_HEIGHT * zoom) / 2
+  const { width: pWidth, height: pHeight } = getPageDimensions(pageConfig);
+  panX = (rect.width - pWidth * zoom) / 2;
+  panY = rect.height > pHeight * zoom
+    ? (rect.height - pHeight * zoom) / 2
     : 36;
   updateZoomUI();
 }
@@ -1074,6 +1109,14 @@ function updatePaperUI() {
     if (spacingGroup) {
       spacingGroup.querySelectorAll('.pill-btn').forEach(btn => {
         btn.classList.toggle('active', btn.getAttribute('data-spacing') === pageConfig.spacing);
+      });
+    }
+
+    const orientationGroup = document.getElementById('orientationGroup');
+    if (orientationGroup) {
+      const currentOrientation = pageConfig.orientation || 'portrait';
+      orientationGroup.querySelectorAll('.pill-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-orientation') === currentOrientation);
       });
     }
 
@@ -1138,11 +1181,12 @@ async function performSave() {
     // Sinh ảnh thumbnail trang 1 để lưu cùng ghi chú
     let page1ThumbUrl = '';
     if (pages.length > 0) {
+      const isLandscape = (pages[0].config.orientation || 'portrait') === 'landscape';
       const offCanvas = document.createElement('canvas');
-      offCanvas.width = 120;
-      offCanvas.height = 170;
+      offCanvas.width = isLandscape ? 170 : 120;
+      offCanvas.height = isLandscape ? 120 : 170;
       drawThumbnailCanvas(offCanvas, pages[0]);
-      page1ThumbUrl = offCanvas.toDataURL('image/webp', 0.65);
+      page1ThumbUrl = (typeof offCanvas.toDataURL === 'function') ? offCanvas.toDataURL('image/webp', 0.65) : '';
     }
 
     const noteData = {
@@ -1391,6 +1435,7 @@ function drawPaperPattern(targetCtx) {
   if (pageConfig.pattern === 'none') return;
 
   const isDark = pageConfig.background === 'dark';
+  const { width: pWidth, height: pHeight } = getPageDimensions(pageConfig);
 
   targetCtx.save();
   targetCtx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.11)';
@@ -1400,19 +1445,19 @@ function drawPaperPattern(targetCtx) {
   if (pageConfig.pattern === 'ruled') {
     const step = (SPACING_SIZES.ruled[pageConfig.spacing] || 50);
     const startY = 80;
-    for (let y = startY; y < PAGE_HEIGHT - 30; y += step) {
+    for (let y = startY; y < pHeight - 30; y += step) {
       targetCtx.moveTo(0, y);
-      targetCtx.lineTo(PAGE_WIDTH, y);
+      targetCtx.lineTo(pWidth, y);
     }
   } else if (pageConfig.pattern === 'grid') {
     const step = (SPACING_SIZES.grid[pageConfig.spacing] || 45);
-    for (let x = step; x < PAGE_WIDTH; x += step) {
+    for (let x = step; x < pWidth; x += step) {
       targetCtx.moveTo(x, 0);
-      targetCtx.lineTo(x, PAGE_HEIGHT);
+      targetCtx.lineTo(x, pHeight);
     }
-    for (let y = step; y < PAGE_HEIGHT; y += step) {
+    for (let y = step; y < pHeight; y += step) {
       targetCtx.moveTo(0, y);
-      targetCtx.lineTo(PAGE_WIDTH, y);
+      targetCtx.lineTo(pWidth, y);
     }
   }
 
@@ -1433,18 +1478,20 @@ function renderAll() {
   ctx.fillRect(0, 0, rect.width, rect.height);
 
   const bgColor = BACKGROUND_COLORS[pageConfig.background] || '#ffffff';
+  const { width: pWidth, height: pHeight } = getPageDimensions(pageConfig);
+
   ctx.save();
   ctx.shadowColor = 'rgba(0, 0, 0, 0.14)';
   ctx.shadowBlur = Math.min(24, 16 * zoom);
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = Math.min(8, 4 * zoom);
   ctx.fillStyle = bgColor;
-  ctx.fillRect(panX, panY, PAGE_WIDTH * zoom, PAGE_HEIGHT * zoom);
+  ctx.fillRect(panX, panY, pWidth * zoom, pHeight * zoom);
   ctx.restore();
 
   ctx.save();
   ctx.beginPath();
-  ctx.rect(panX, panY, PAGE_WIDTH * zoom, PAGE_HEIGHT * zoom);
+  ctx.rect(panX, panY, pWidth * zoom, pHeight * zoom);
   ctx.clip();
 
   ctx.translate(panX, panY);
@@ -1841,6 +1888,38 @@ if (paperMenu) {
     });
   }
 
+  const orientationGroup = document.getElementById('orientationGroup');
+  if (orientationGroup) {
+    orientationGroup.addEventListener('click', (e) => {
+      const btn = e.target.closest('.pill-btn');
+      if (!btn) return;
+      e.stopPropagation();
+
+      const newOrientation = btn.getAttribute('data-orientation') || 'portrait';
+      if (newOrientation === (pageConfig.orientation || 'portrait')) return;
+
+      const { width: newWidth, height: newHeight } = (newOrientation === 'landscape')
+        ? { width: PAGE_LANDSCAPE_WIDTH, height: PAGE_LANDSCAPE_HEIGHT }
+        : { width: PAGE_PORTRAIT_WIDTH, height: PAGE_PORTRAIT_HEIGHT };
+
+      const hasStrokesOutside = checkStrokesOutsideBounds(newWidth, newHeight);
+      if (hasStrokesOutside) {
+        const proceed = confirm('Một số nét vẽ nằm ngoài khổ giấy mới sẽ tạm thời không hiển thị (vẫn được lưu trong dữ liệu và hiển thị lại đầy đủ khi đổi lại hướng cũ).\n\nBạn có muốn tiếp tục đổi hướng không?');
+        if (!proceed) return;
+      }
+
+      pageConfig.orientation = newOrientation;
+      orientationGroup.querySelectorAll('.pill-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      centerPage(zoom);
+      updateCurrentPageThumbnail();
+      renderSidebar();
+      scheduleAutoSave();
+      renderAll();
+    });
+  }
+
   const bgColorGroup = document.getElementById('bgColorGroup');
   if (bgColorGroup) {
     bgColorGroup.addEventListener('click', (e) => {
@@ -1857,6 +1936,21 @@ if (paperMenu) {
       renderAll();
     });
   }
+}
+
+function checkStrokesOutsideBounds(limitWidth, limitHeight) {
+  for (let i = 0; i < strokes.length; i++) {
+    const s = strokes[i];
+    if (s.aabb) {
+      if (s.aabb.maxX > limitWidth || s.aabb.maxY > limitHeight) return true;
+    } else if (s.points) {
+      for (let j = 0; j < s.points.length; j++) {
+        const pt = s.points[j];
+        if (pt.x > limitWidth || pt.y > limitHeight) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // Menu Sao lưu & Phục hồi
@@ -2053,8 +2147,9 @@ canvas.addEventListener('pointerdown', (e) => {
   if (isInteracting) return;
 
   const paperPt = getPaperPoint(e);
+  const { width: pWidth, height: pHeight } = getPageDimensions(pageConfig);
 
-  if (paperPt.x < 0 || paperPt.x > PAGE_WIDTH || paperPt.y < 0 || paperPt.y > PAGE_HEIGHT) {
+  if (paperPt.x < 0 || paperPt.x > pWidth || paperPt.y < 0 || paperPt.y > pHeight) {
     return;
   }
 

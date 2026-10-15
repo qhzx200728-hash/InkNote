@@ -113,7 +113,8 @@
           config: {
             background: 'white',
             pattern: 'none',
-            spacing: 'medium'
+            spacing: 'medium',
+            orientation: 'portrait'
           },
           strokes: []
         }
@@ -150,7 +151,18 @@
       const store = tx.objectStore(STORE_NOTES);
       const request = store.get(noteId);
 
-      request.onsuccess = () => resolve(request.result || null);
+      request.onsuccess = () => {
+        const note = request.result;
+        if (note && Array.isArray(note.pages)) {
+          note.pages.forEach(p => {
+            if (p) {
+              if (!p.config) p.config = {};
+              if (!p.config.orientation) p.config.orientation = 'portrait';
+            }
+          });
+        }
+        resolve(note || null);
+      };
       request.onerror = () => reject(request.error || new Error('Lỗi khi đọc dữ liệu ghi chú'));
     });
   }
@@ -607,6 +619,17 @@
         noteFolderId = folderIdMap[noteFolderId];
       }
 
+      const cleanPages = (note.pages || []).map(p => {
+        if (!p) return p;
+        return {
+          ...p,
+          config: {
+            ...p.config,
+            orientation: (p.config && p.config.orientation) || 'portrait'
+          }
+        };
+      });
+
       const cleanNote = {
         version: 2,
         id: newNoteId,
@@ -615,7 +638,7 @@
         createdAt: note.createdAt || Date.now(),
         updatedAt: note.updatedAt || Date.now(),
         thumbnail: note.thumbnail || '',
-        pages: note.pages
+        pages: cleanPages
       };
 
       await saveNote(cleanNote);
