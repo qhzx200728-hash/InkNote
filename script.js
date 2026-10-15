@@ -161,6 +161,21 @@ const compassRadiusInput = document.getElementById('compassRadiusInput');
 const closeCompassRadiusModalBtn = document.getElementById('closeCompassRadiusModalBtn');
 const cancelCompassRadiusBtn = document.getElementById('cancelCompassRadiusBtn');
 
+// Trạng thái Công thức LaTeX
+let latexBtn = document.getElementById('latexBtn');
+let latexModal = document.getElementById('latexModal');
+let latexForm = document.getElementById('latexForm');
+let latexCodeInput = document.getElementById('latexCodeInput');
+let latexPreviewBox = document.getElementById('latexPreviewBox');
+let latexErrorBox = document.getElementById('latexErrorBox');
+let latexModalTitle = document.getElementById('latexModalTitle');
+let confirmLatexBtn = document.getElementById('confirmLatexBtn');
+let cancelLatexBtn = document.getElementById('cancelLatexBtn');
+let closeLatexModalBtn = document.getElementById('closeLatexModalBtn');
+let editFormulaSelectionBtn = document.getElementById('editFormulaSelectionBtn');
+let editingFormulaId = null;
+const formulaImageCache = new Map();
+
 // Trạng thái Công cụ Lasso & Lựa chọn Đối tượng
 let lassoBtn = document.getElementById('lassoBtn');
 let selectionActions = document.getElementById('selectionActions');
@@ -1391,6 +1406,9 @@ async function loadInitialData() {
   } catch (err) {
     console.error('Lỗi khởi động app:', err);
     setSaveStatus('error', 'Lỗi khởi động dữ liệu');
+  } finally {
+    window._appReady = true;
+    try { window.dispatchEvent(new CustomEvent('app-ready')); } catch (e) {}
   }
 }
 
@@ -2040,11 +2058,27 @@ function drawObject(targetCtx, obj) {
     drawShape(targetCtx, obj);
   } else if (obj.type === 'arc') {
     drawArcObject(targetCtx, obj);
+  } else if (obj.type === 'formula') {
+    drawFormulaObject(targetCtx, obj);
   }
+}
+
+function computeFormulaAABB(formula) {
+  const pad = 4;
+  return {
+    minX: (formula.x || 0) - pad,
+    minY: (formula.y || 0) - pad,
+    maxX: (formula.x || 0) + (formula.width || 0) + pad,
+    maxY: (formula.y || 0) + (formula.height || 0) + pad
+  };
 }
 
 function getObjectBounds(obj) {
   if (!obj) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  if (obj.type === 'formula') {
+    obj.aabb = computeFormulaAABB(obj);
+    return obj.aabb;
+  }
   if (obj.aabb) return obj.aabb;
   if (obj.type === 'stroke') {
     obj.aabb = computeStrokeAABB(obj);
@@ -2119,6 +2153,18 @@ function transformObject(obj, { dx = 0, dy = 0, scale = 1, originX = 0, originY 
       obj.cy += dy;
     }
     obj.aabb = computeArcAABB(obj);
+  } else if (obj.type === 'formula') {
+    if (scale !== 1) {
+      obj.x = originX + (obj.x - originX) * scale + dx;
+      obj.y = originY + (obj.y - originY) * scale + dy;
+      obj.width = Math.max(10, (obj.width || 50) * scale);
+      obj.height = Math.max(10, (obj.height || 20) * scale);
+      obj.scale = (obj.scale || 1) * scale;
+    } else {
+      obj.x += dx;
+      obj.y += dy;
+    }
+    obj.aabb = computeFormulaAABB(obj);
   } else {
     if (obj.x !== undefined && obj.y !== undefined) {
       if (scale !== 1) {
@@ -2192,6 +2238,29 @@ function isObjectSelectedByLasso(obj, polygon) {
       }
     }
     return (insideCount / pts.length) >= 0.5;
+  } else if (obj.type === 'formula') {
+    const cx = (obj.x || 0) + (obj.width || 0) / 2;
+    const cy = (obj.y || 0) + (obj.height || 0) / 2;
+    if (isPointInPolygon(cx, cy, polygon)) return true;
+
+    const b = getObjectBounds(obj);
+    const pts = [
+      { x: b.minX, y: b.minY },
+      { x: b.maxX, y: b.minY },
+      { x: b.maxX, y: b.maxY },
+      { x: b.minX, y: b.maxY },
+      { x: (obj.x || 0) + (obj.width || 0) * 0.25, y: cy },
+      { x: (obj.x || 0) + (obj.width || 0) * 0.75, y: cy },
+      { x: cx, y: (obj.y || 0) + (obj.height || 0) * 0.25 },
+      { x: cx, y: (obj.y || 0) + (obj.height || 0) * 0.75 }
+    ];
+    let insideCount = 0;
+    for (const p of pts) {
+      if (isPointInPolygon(p.x, p.y, polygon)) {
+        insideCount++;
+      }
+    }
+    return (insideCount / pts.length) >= 0.25;
   } else {
     const b = getObjectBounds(obj);
     const cx = (b.minX + b.maxX) / 2;
@@ -2263,7 +2332,22 @@ function updateSelectionActionsUI() {
   if (!selectionActions) return;
   if (!selectionBounds || selectedObjectIds.size === 0) {
     selectionActions.style.display = 'none';
+    if (editFormulaSelectionBtn) editFormulaSelectionBtn.style.display = 'none';
     return;
+  }
+
+  // Nếu chỉ đang chọn đúng MỘT công thức -> hiện nút "Sửa công thức"
+  if (editFormulaSelectionBtn) {
+    if (selectedObjectIds.size === 1) {
+      const selectedObj = pageObjects.find(o => selectedObjectIds.has(o.id));
+      if (selectedObj && selectedObj.type === 'formula') {
+        editFormulaSelectionBtn.style.display = 'inline-flex';
+      } else {
+        editFormulaSelectionBtn.style.display = 'none';
+      }
+    } else {
+      editFormulaSelectionBtn.style.display = 'none';
+    }
   }
 
   const rect = canvas.getBoundingClientRect();
@@ -2274,15 +2358,19 @@ function updateSelectionActionsUI() {
     screenTop = rect.top + panY + selectionBounds.maxY * zoom + 12;
   }
 
+  const safeLeft = Math.max(140, Math.min(window.innerWidth - 140, screenLeft));
+  const safeTop = Math.max(60, Math.min(window.innerHeight - 60, screenTop));
+
   selectionActions.style.display = 'flex';
-  selectionActions.style.left = `${screenLeft}px`;
-  selectionActions.style.top = `${screenTop}px`;
+  selectionActions.style.left = `${safeLeft}px`;
+  selectionActions.style.top = `${safeTop}px`;
 }
 
 function deselectObjects() {
   if (selectedObjectIds.size > 0 || selectionBounds) {
     selectedObjectIds.clear();
     selectionBounds = null;
+    if (editFormulaSelectionBtn) editFormulaSelectionBtn.style.display = 'none';
     updateSelectionActionsUI();
     renderAll();
   }
@@ -2805,6 +2893,13 @@ function findSnapVertex(paperPt, snapRadiusScreen = 15) {
     } else if (obj.type === 'stroke' && obj.points && obj.points.length > 0) {
       candidates.push(obj.points[0]);
       candidates.push(obj.points[obj.points.length - 1]);
+    } else if (obj.type === 'formula') {
+      const b = obj.aabb || getObjectBounds(obj);
+      candidates.push({ x: b.minX, y: b.minY });
+      candidates.push({ x: b.maxX, y: b.minY });
+      candidates.push({ x: b.maxX, y: b.maxY });
+      candidates.push({ x: b.minX, y: b.maxY });
+      candidates.push({ x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 });
     }
 
     for (const c of candidates) {
@@ -3141,6 +3236,363 @@ function drawCompass(targetCtx) {
   targetCtx.restore();
 
   targetCtx.restore();
+}
+
+// ==========================================
+// 10e. Công cụ Chèn Công thức LaTeX
+// ==========================================
+
+function getViewportCenterPaperPoint() {
+  const rect = canvas.getBoundingClientRect();
+  const screenCenterX = rect.width / 2;
+  const screenCenterY = rect.height / 2;
+  const pageDims = getPageDimensions(pageConfig);
+  let pageX = (screenCenterX - panX) / zoom;
+  let pageY = (screenCenterY - panY) / zoom;
+  pageX = Math.max(80, Math.min(pageDims.width - 80, pageX));
+  pageY = Math.max(80, Math.min(pageDims.height - 80, pageY));
+  return { x: pageX, y: pageY };
+}
+
+function getOrCreateFormulaImage(latex, displayMode, color) {
+  const safeColor = color || '#1a1a1a';
+  const safeMode = displayMode || 'display';
+  const cacheKey = `${latex}___${safeMode}___${safeColor}`;
+  let cached = formulaImageCache.get(cacheKey);
+  if (cached) return cached;
+
+  cached = { loaded: false, error: false, img: null, loading: true };
+  formulaImageCache.set(cacheKey, cached);
+
+  try {
+    if (!window.MathJax || typeof window.MathJax.tex2svg !== 'function') {
+      cached.error = true;
+      cached.loading = false;
+      return cached;
+    }
+
+    const isDisplay = (safeMode === 'display');
+    const node = window.MathJax.tex2svg(latex, { display: isDisplay });
+    const svg = node.querySelector('svg');
+    if (!svg) {
+      cached.error = true;
+      cached.loading = false;
+      return cached;
+    }
+
+    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    svg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+    svg.style.color = safeColor;
+
+    const vbAttr = svg.getAttribute('viewBox');
+    if (vbAttr) {
+      const vb = vbAttr.split(' ').map(Number);
+      if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) {
+        const aspect = vb[3] / vb[2];
+        const crispW = Math.max(1200, Math.min(2800, Math.round(vb[2])));
+        const crispH = Math.max(100, Math.round(crispW * aspect));
+        svg.setAttribute('width', `${crispW}px`);
+        svg.setAttribute('height', `${crispH}px`);
+      }
+    }
+
+    const svgXml = new XMLSerializer().serializeToString(svg);
+    const blob = new Blob([svgXml], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+
+    img.onload = () => {
+      cached.loaded = true;
+      cached.loading = false;
+      cached.img = img;
+      URL.revokeObjectURL(url);
+      if (typeof renderAll === 'function') {
+        renderAll();
+      }
+      if (typeof updateCurrentPageThumbnail === 'function') {
+        updateCurrentPageThumbnail();
+      }
+    };
+    img.onerror = () => {
+      cached.loaded = false;
+      cached.loading = false;
+      cached.error = true;
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  } catch (err) {
+    console.error('Error generating formula image:', err);
+    cached.error = true;
+    cached.loading = false;
+  }
+
+  return cached;
+}
+
+function drawFormulaObject(targetCtx, formula) {
+  if (!formula || !formula.latex) return;
+  const cached = getOrCreateFormulaImage(formula.latex, formula.displayMode, formula.color);
+  if (cached && cached.loaded && cached.img) {
+    targetCtx.drawImage(cached.img, formula.x, formula.y, formula.width, formula.height);
+  } else if (!cached || cached.loading) {
+    targetCtx.save();
+    targetCtx.fillStyle = 'rgba(150, 150, 150, 0.08)';
+    targetCtx.fillRect(formula.x, formula.y, formula.width, formula.height);
+    targetCtx.restore();
+  }
+}
+
+function isFormulaHitByEraser(formula, eX, eY, rPaper) {
+  const b = getObjectBounds(formula);
+  const nearestX = Math.max(b.minX, Math.min(eX, b.maxX));
+  const nearestY = Math.max(b.minY, Math.min(eY, b.maxY));
+  const dx = eX - nearestX;
+  const dy = eY - nearestY;
+  return (dx * dx + dy * dy) <= (rPaper * rPaper);
+}
+
+function updateLatexPreview() {
+  if (!latexPreviewBox || !latexCodeInput || !confirmLatexBtn) return;
+  const rawLatex = latexCodeInput.value.trim();
+
+  if (!rawLatex) {
+    latexPreviewBox.innerHTML = '<span style="color: #8c959f; font-size: 13px;">(Nhập mã LaTeX để xem trước)</span>';
+    if (latexErrorBox) {
+      latexErrorBox.style.display = 'none';
+      latexErrorBox.textContent = '';
+    }
+    confirmLatexBtn.disabled = true;
+    return;
+  }
+
+  if (!window.MathJax || typeof window.MathJax.tex2svg !== 'function') {
+    if (latexErrorBox) {
+      latexErrorBox.style.display = 'block';
+      latexErrorBox.textContent = 'Lỗi: Thư viện MathJax chưa sẵn sàng';
+    }
+    confirmLatexBtn.disabled = true;
+    return;
+  }
+
+  try {
+    const isDisplay = (document.querySelector('input[name="latexDisplayMode"]:checked')?.value || 'display') === 'display';
+    const node = window.MathJax.tex2svg(rawLatex, { display: isDisplay });
+
+    // Kiểm tra xem MathJax có trả về lỗi bên trong node không
+    const merror = node.querySelector('merror, [data-mjx-error]');
+    if (merror) {
+      const errorText = merror.getAttribute('title') || merror.textContent || 'Cú pháp LaTeX không hợp lệ';
+      if (latexErrorBox) {
+        latexErrorBox.textContent = 'Lỗi: ' + errorText;
+        latexErrorBox.style.display = 'block';
+      }
+      latexPreviewBox.innerHTML = '<span style="color: #cf222e; font-size: 13px;">(Công thức có lỗi cú pháp)</span>';
+      confirmLatexBtn.disabled = true;
+      return;
+    }
+
+    const svg = node.querySelector('svg');
+    if (!svg) {
+      throw new Error('Không thể tạo SVG từ công thức này');
+    }
+
+    svg.style.color = currentColor || '#1a1a1a';
+    svg.style.maxWidth = '100%';
+    svg.style.height = 'auto';
+
+    latexPreviewBox.innerHTML = '';
+    latexPreviewBox.appendChild(node);
+
+    if (latexErrorBox) {
+      latexErrorBox.style.display = 'none';
+      latexErrorBox.textContent = '';
+    }
+    confirmLatexBtn.disabled = false;
+  } catch (err) {
+    if (latexErrorBox) {
+      latexErrorBox.textContent = 'Lỗi: ' + (err.message || 'Cú pháp LaTeX không hợp lệ');
+      latexErrorBox.style.display = 'block';
+    }
+    latexPreviewBox.innerHTML = '<span style="color: #cf222e; font-size: 13px;">(Công thức có lỗi cú pháp)</span>';
+    confirmLatexBtn.disabled = true;
+  }
+}
+
+function showLatexModal(editingFormula = null) {
+  if (!latexModal) return;
+  if (paperMenu) paperMenu.classList.remove('open');
+  if (shapeMenu) shapeMenu.classList.remove('open');
+  if (backupMenu) backupMenu.classList.remove('open');
+
+  if (editingFormula) {
+    editingFormulaId = editingFormula.id;
+    if (latexModalTitle) latexModalTitle.textContent = 'Sửa công thức LaTeX';
+    if (confirmLatexBtn) confirmLatexBtn.textContent = 'Cập nhật';
+    if (latexCodeInput) latexCodeInput.value = editingFormula.latex || '';
+    const displayMode = editingFormula.displayMode || 'display';
+    const radio = document.querySelector(`input[name="latexDisplayMode"][value="${displayMode}"]`);
+    if (radio) radio.checked = true;
+  } else {
+    editingFormulaId = null;
+    if (latexModalTitle) latexModalTitle.textContent = 'Chèn công thức LaTeX';
+    if (confirmLatexBtn) confirmLatexBtn.textContent = 'Chèn';
+    if (latexCodeInput) latexCodeInput.value = '';
+    const displayRadio = document.querySelector('input[name="latexDisplayMode"][value="display"]');
+    if (displayRadio) displayRadio.checked = true;
+  }
+
+  updateLatexPreview();
+  latexModal.style.display = 'flex';
+  if (latexCodeInput) {
+    setTimeout(() => {
+      latexCodeInput.focus();
+      latexCodeInput.select();
+    }, 50);
+  }
+}
+
+function hideLatexModal() {
+  if (!latexModal) return;
+  latexModal.style.display = 'none';
+  editingFormulaId = null;
+  if (latexCodeInput) latexCodeInput.value = '';
+  if (latexErrorBox) {
+    latexErrorBox.style.display = 'none';
+    latexErrorBox.textContent = '';
+  }
+}
+
+function submitLatexFormula() {
+  const rawLatex = latexCodeInput ? latexCodeInput.value.trim() : '';
+  if (!rawLatex) return;
+
+  const isDisplay = (document.querySelector('input[name="latexDisplayMode"]:checked')?.value || 'display') === 'display';
+  const displayMode = isDisplay ? 'display' : 'inline';
+
+  // Render node để đo kích thước viewBox của công thức
+  let vbW = 1000, vbH = 500;
+  try {
+    const node = window.MathJax.tex2svg(rawLatex, { display: isDisplay });
+    const svg = node.querySelector('svg');
+    if (svg && svg.getAttribute('viewBox')) {
+      const vb = svg.getAttribute('viewBox').split(' ').map(Number);
+      if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) {
+        vbW = vb[2];
+        vbH = vb[3];
+      }
+    }
+  } catch (e) {
+    return;
+  }
+
+  const emSize = 30;
+  let naturalWidth = (vbW / 1000) * emSize;
+  let naturalHeight = (vbH / 1000) * emSize;
+  const pageDims = getPageDimensions(pageConfig);
+  if (naturalWidth > pageDims.width * 0.8) {
+    const s = (pageDims.width * 0.8) / naturalWidth;
+    naturalWidth *= s;
+    naturalHeight *= s;
+  }
+
+  if (editingFormulaId) {
+    // Sửa công thức hiện có: giữ nguyên vị trí tâm và tỉ lệ scale đã chỉnh
+    const targetFormulaId = editingFormulaId;
+    const existing = pageObjects.find(o => o.id === targetFormulaId);
+    if (!existing) {
+      hideLatexModal();
+      return;
+    }
+
+    const oldSnap = cloneObject(existing);
+    const currentScale = existing.scale || 1.0;
+    const oldCenterX = existing.x + existing.width / 2;
+    const oldCenterY = existing.y + existing.height / 2;
+    const newWidth = naturalWidth * currentScale;
+    const newHeight = naturalHeight * currentScale;
+    const newX = oldCenterX - newWidth / 2;
+    const newY = oldCenterY - newHeight / 2;
+
+    const newSnap = cloneObject(existing);
+    newSnap.latex = rawLatex;
+    newSnap.displayMode = displayMode;
+    newSnap.naturalWidth = naturalWidth;
+    newSnap.naturalHeight = naturalHeight;
+    newSnap.width = newWidth;
+    newSnap.height = newHeight;
+    newSnap.scale = currentScale;
+    newSnap.x = newX;
+    newSnap.y = newY;
+
+    hideLatexModal();
+
+    getOrCreateFormulaImage(newSnap.latex, newSnap.displayMode, newSnap.color);
+
+    executeAction({
+      type: 'edit_formula',
+      do: () => {
+        const obj = pageObjects.find(o => o.id === targetFormulaId);
+        if (obj) {
+          Object.assign(obj, cloneObject(newSnap));
+          obj.aabb = getObjectBounds(obj);
+          selectionBounds = computeSelectionBounds();
+          updateSelectionActionsUI();
+        }
+      },
+      undo: () => {
+        const obj = pageObjects.find(o => o.id === targetFormulaId);
+        if (obj) {
+          Object.assign(obj, cloneObject(oldSnap));
+          obj.aabb = getObjectBounds(obj);
+          selectionBounds = computeSelectionBounds();
+          updateSelectionActionsUI();
+        }
+      }
+    });
+  } else {
+    // Chèn công thức mới vào giữa vùng đang nhìn (viewport) của trang
+    const center = getViewportCenterPaperPoint();
+    const newX = center.x - naturalWidth / 2;
+    const newY = center.y - naturalHeight / 2;
+
+    const newFormula = {
+      id: 'formula_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+      type: 'formula',
+      latex: rawLatex,
+      displayMode: displayMode,
+      color: currentColor || '#1a1a1a',
+      x: newX,
+      y: newY,
+      width: naturalWidth,
+      height: naturalHeight,
+      naturalWidth: naturalWidth,
+      naturalHeight: naturalHeight,
+      scale: 1.0
+    };
+    newFormula.aabb = getObjectBounds(newFormula);
+
+    hideLatexModal();
+
+    executeAction({
+      type: 'add_formula',
+      formula: newFormula,
+      do: () => {
+        pageObjects.push(newFormula);
+        setTool('lasso');
+        selectedObjectIds.clear();
+        selectedObjectIds.add(newFormula.id);
+        selectionBounds = computeSelectionBounds();
+        updateSelectionActionsUI();
+      },
+      undo: () => {
+        const idx = pageObjects.findIndex(o => o.id === newFormula.id);
+        if (idx !== -1) pageObjects.splice(idx, 1);
+        selectedObjectIds.delete(newFormula.id);
+        selectionBounds = computeSelectionBounds();
+        updateSelectionActionsUI();
+      }
+    });
+  }
 }
 
 function renderAll() {
@@ -3612,6 +4064,92 @@ if (closeCompassRadiusModalBtn) {
   });
 }
 
+// Các nút trên hộp thoại Công thức LaTeX
+if (latexBtn) {
+  latexBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showLatexModal();
+  });
+  latexBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
+if (latexForm) {
+  latexForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (confirmLatexBtn && !confirmLatexBtn.disabled) {
+      submitLatexFormula();
+    }
+  });
+}
+
+if (confirmLatexBtn) {
+  confirmLatexBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!confirmLatexBtn.disabled) {
+      submitLatexFormula();
+    }
+  });
+}
+
+if (latexCodeInput) {
+  latexCodeInput.addEventListener('input', () => {
+    updateLatexPreview();
+  });
+  latexCodeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if (confirmLatexBtn && !confirmLatexBtn.disabled) {
+        submitLatexFormula();
+      }
+    }
+  });
+}
+
+document.querySelectorAll('input[name="latexDisplayMode"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    updateLatexPreview();
+  });
+});
+
+if (cancelLatexBtn) {
+  cancelLatexBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideLatexModal();
+  });
+}
+
+if (closeLatexModalBtn) {
+  closeLatexModalBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideLatexModal();
+  });
+}
+
+if (latexModal) {
+  latexModal.addEventListener('click', (e) => {
+    if (e.target === latexModal) {
+      hideLatexModal();
+    }
+  });
+}
+
+if (editFormulaSelectionBtn) {
+  editFormulaSelectionBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (selectedObjectIds && selectedObjectIds.size === 1) {
+      const selectedObj = pageObjects.find(o => selectedObjectIds.has(o.id));
+      if (selectedObj && selectedObj.type === 'formula') {
+        showLatexModal(selectedObj);
+      }
+    }
+  });
+  editFormulaSelectionBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
 // Các nút trên thanh thao tác nổi cho vùng chọn Lasso
 if (selectionActions) {
   selectionActions.addEventListener('pointerdown', (e) => {
@@ -3997,6 +4535,7 @@ window.addEventListener('keydown', (e) => {
     hideMoveNoteDialog();
     hideDeleteFolderDialog();
     hideCompassRadiusModal();
+    hideLatexModal();
     if (paperMenu) paperMenu.classList.remove('open');
     if (shapeMenu) shapeMenu.classList.remove('open');
     if (backupMenu) backupMenu.classList.remove('open');
@@ -4125,7 +4664,7 @@ canvas.addEventListener('pointerleave', () => {
 
 canvas.addEventListener('pointerdown', (e) => {
   if (noteListView && noteListView.style.display !== 'none') return;
-  if (e.pointerType !== 'pen' && e.pointerType !== 'eraser') return;
+  if (e.pointerType !== 'pen' && e.pointerType !== 'eraser' && e.pointerType !== 'mouse') return;
   if (isInteracting) return;
 
   const paperPt = getPaperPoint(e);
@@ -4379,7 +4918,9 @@ function checkAndEraseStrokes(paperX, paperY) {
       ? isStrokeHitByEraser(s, paperX, paperY, rPaper)
       : (s.type === 'arc'
           ? isArcHitByEraser(s, paperX, paperY, rPaper)
-          : isShapeHitByEraser(s, paperX, paperY, rPaper));
+          : (s.type === 'formula'
+              ? isFormulaHitByEraser(s, paperX, paperY, rPaper)
+              : isShapeHitByEraser(s, paperX, paperY, rPaper)));
     if (isHit) {
       erasedInCurrentDrag.push({ stroke: s, originalIndex: i });
       selectedObjectIds.delete(s.id);
@@ -4396,7 +4937,7 @@ function checkAndEraseStrokes(paperX, paperY) {
 }
 
 canvas.addEventListener('pointermove', (e) => {
-  if (e.pointerType !== 'pen' && e.pointerType !== 'eraser') return;
+  if (e.pointerType !== 'pen' && e.pointerType !== 'eraser' && e.pointerType !== 'mouse') return;
   if (!isInteracting || e.pointerId !== activePointerId) return;
 
   if (e.buttons === 0) {
@@ -4492,6 +5033,10 @@ canvas.addEventListener('pointermove', (e) => {
             obj.cx = snap.cx + dx;
             obj.cy = snap.cy + dy;
             obj.aabb = computeArcAABB(obj);
+          } else if (obj.type === 'formula') {
+            obj.x = snap.x + dx;
+            obj.y = snap.y + dy;
+            obj.aabb = computeFormulaAABB(obj);
           }
         }
       }
@@ -4538,6 +5083,13 @@ canvas.addEventListener('pointermove', (e) => {
             obj.r = Math.max(1, snap.r * scale);
             obj.baseWidth = Math.max(1, (snap.baseWidth || 5) * scale);
             obj.aabb = computeArcAABB(obj);
+          } else if (obj.type === 'formula') {
+            obj.x = ox + (snap.x - ox) * scale;
+            obj.y = oy + (snap.y - oy) * scale;
+            obj.width = Math.max(10, (snap.width || 50) * scale);
+            obj.height = Math.max(10, (snap.height || 20) * scale);
+            obj.scale = (snap.scale || 1) * scale;
+            obj.aabb = computeFormulaAABB(obj);
           }
         }
       }
@@ -4551,7 +5103,7 @@ canvas.addEventListener('pointermove', (e) => {
 
     let hasNewPoints = false;
     for (const ev of events) {
-      if (ev.pointerType !== 'pen' && ev.pointerType !== 'eraser') continue;
+      if (ev.pointerType !== 'pen' && ev.pointerType !== 'eraser' && ev.pointerType !== 'mouse') continue;
 
       const distScreen = Math.hypot(ev.clientX - lastScreenX, ev.clientY - lastScreenY);
       if (distScreen < 1.5) {
@@ -4586,7 +5138,7 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 function handlePointerEnd(e) {
-  if (e.pointerType !== 'pen' && e.pointerType !== 'eraser') return;
+  if (e.pointerType !== 'pen' && e.pointerType !== 'eraser' && e.pointerType !== 'mouse') return;
   if (!isInteracting || e.pointerId !== activePointerId) return;
 
   e.preventDefault();
@@ -4636,6 +5188,25 @@ function handlePointerEnd(e) {
         selectedObjectIds.clear();
         selectionBounds = null;
       }
+    } else if (lassoPath && lassoPath.length > 0) {
+      const pt = lassoPath[0];
+      let tapped = null;
+      for (let i = pageObjects.length - 1; i >= 0; i--) {
+        const o = pageObjects[i];
+        const b = getObjectBounds(o);
+        const pad = 12;
+        if (pt.x >= b.minX - pad && pt.x <= b.maxX + pad && pt.y >= b.minY - pad && pt.y <= b.maxY + pad) {
+          tapped = o;
+          break;
+        }
+      }
+      if (tapped) {
+        selectedObjectIds = new Set([tapped.id]);
+        selectionBounds = computeSelectionBounds();
+      } else {
+        selectedObjectIds.clear();
+        selectionBounds = null;
+      }
     } else {
       selectedObjectIds.clear();
       selectionBounds = null;
@@ -4653,11 +5224,21 @@ function handlePointerEnd(e) {
         const b = beforeSnapshots[i];
         const a = afterSnapshots.find(o => o.id === b.id);
         if (a && b) {
+          if (a.type === 'formula' && b.type === 'formula') {
+            if (Math.abs((a.x || 0) - (b.x || 0)) > 0.1 ||
+                Math.abs((a.y || 0) - (b.y || 0)) > 0.1 ||
+                Math.abs((a.width || 0) - (b.width || 0)) > 0.1 ||
+                Math.abs((a.height || 0) - (b.height || 0)) > 0.1 ||
+                Math.abs((a.scale || 1) - (b.scale || 1)) > 0.01) {
+              hasChanged = true;
+              break;
+            }
+          }
           if (Math.abs((a.baseWidth || 5) - (b.baseWidth || 5)) > 0.01 ||
-              Math.abs(a.aabb.minX - b.aabb.minX) > 0.1 ||
-              Math.abs(a.aabb.minY - b.aabb.minY) > 0.1 ||
-              Math.abs(a.aabb.maxX - b.aabb.maxX) > 0.1 ||
-              Math.abs(a.aabb.maxY - b.aabb.maxY) > 0.1) {
+              Math.abs((a.aabb?.minX || 0) - (b.aabb?.minX || 0)) > 0.1 ||
+              Math.abs((a.aabb?.minY || 0) - (b.aabb?.minY || 0)) > 0.1 ||
+              Math.abs((a.aabb?.maxX || 0) - (b.aabb?.maxX || 0)) > 0.1 ||
+              Math.abs((a.aabb?.maxY || 0) - (b.aabb?.maxY || 0)) > 0.1) {
             hasChanged = true;
             break;
           }
@@ -4847,18 +5428,37 @@ canvas.addEventListener('touchstart', (e) => {
 // ==========================================
 // 16. Khởi động ứng dụng
 // ==========================================
-window.addEventListener('DOMContentLoaded', async () => {
+async function initApp() {
   centerPage(1.0);
   resizeCanvas();
   updateUndoRedoUI();
   setTool('pen');
   updateSizeAndColorPreview();
   await loadInitialData();
-});
+}
 
-centerPage(1.0);
-resizeCanvas();
-updateUndoRedoUI();
-setTool('pen');
-updateSizeAndColorPreview();
-loadInitialData();
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', initApp);
+} else {
+  initApp();
+}
+
+// Expose state for testing & debugging
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'pageObjects', { get: () => pageObjects, set: (v) => { pageObjects = v; strokes = v; } });
+  Object.defineProperty(window, 'pages', { get: () => pages, set: (v) => { pages = v; } });
+  Object.defineProperty(window, 'currentPageIndex', { get: () => currentPageIndex, set: (v) => { currentPageIndex = v; } });
+  Object.defineProperty(window, 'selectedObjectIds', { get: () => selectedObjectIds, set: (v) => { selectedObjectIds = v; } });
+  Object.defineProperty(window, 'undoStack', { get: () => undoStack });
+  Object.defineProperty(window, 'redoStack', { get: () => redoStack });
+  Object.defineProperty(window, 'currentTool', { get: () => currentTool, set: (v) => { currentTool = v; } });
+  window.undo = undo;
+  window.redo = redo;
+  window.copySelectedObjects = copySelectedObjects;
+  window.pasteObjects = pasteObjects;
+  window.transformObject = transformObject;
+  window.isObjectSelectedByLasso = isObjectSelectedByLasso;
+  window.isFormulaHitByEraser = isFormulaHitByEraser;
+  window.getObjectBounds = getObjectBounds;
+  window.drawThumbnailCanvas = drawThumbnailCanvas;
+}
