@@ -1,0 +1,13 @@
+# Hệ điều hành & file tạm
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+
+# Cấu hình IDE / Trình soạn thảo
+.vscode/
+.idea/
+
+# Thư viện phụ thuộc nếu có sau này
+node_modules/
+
