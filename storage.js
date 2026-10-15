@@ -116,6 +116,7 @@
             spacing: 'medium',
             orientation: 'portrait'
           },
+          objects: [],
           strokes: []
         }
       ]
@@ -158,6 +159,18 @@
             if (p) {
               if (!p.config) p.config = {};
               if (!p.config.orientation) p.config.orientation = 'portrait';
+              if (!Array.isArray(p.objects)) {
+                p.objects = (p.strokes || []).map(s => ({
+                  id: s.id || ('obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6)),
+                  type: s.type || 'stroke',
+                  points: s.points || [],
+                  color: s.color || '#1a1a1a',
+                  baseWidth: s.baseWidth || 5
+                }));
+              }
+              if (!Array.isArray(p.strokes)) {
+                p.strokes = p.objects.filter(o => o.type === 'stroke');
+              }
             }
           });
         }
@@ -621,12 +634,23 @@
 
       const cleanPages = (note.pages || []).map(p => {
         if (!p) return p;
+        const rawList = p.objects || p.strokes || [];
+        const cleanObjects = rawList.map(o => ({
+          id: o.id || ('obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6)),
+          type: o.type || 'stroke',
+          points: o.points || [],
+          color: o.color || '#1a1a1a',
+          baseWidth: o.baseWidth || 5,
+          ...(o.type && o.type !== 'stroke' ? o : {})
+        }));
         return {
           ...p,
           config: {
             ...p.config,
             orientation: (p.config && p.config.orientation) || 'portrait'
-          }
+          },
+          objects: cleanObjects,
+          strokes: cleanObjects.filter(o => o.type === 'stroke')
         };
       });
 

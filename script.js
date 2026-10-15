@@ -64,6 +64,7 @@ function createNewPageObject(inheritedConfig = null) {
       spacing: inheritedConfig ? (inheritedConfig.spacing || 'medium') : 'medium',
       orientation: inheritedConfig ? (inheritedConfig.orientation || 'portrait') : 'portrait'
     },
+    objects: [],
     strokes: [],
     view: {
       zoom: 1.0,
@@ -90,9 +91,10 @@ let folderToDeleteId = null;
 let pages = [createNewPageObject()];
 let currentPageIndex = 0;
 
-// Trạng thái của trang hiện tại
+// Trạng thái của trang hiện tại (Hệ thống Đối tượng)
 let pageConfig = { ...pages[0].config };
-let strokes = [];
+let pageObjects = [];
+let strokes = pageObjects; // Giữ tham chiếu tương thích ngược với code cũ
 let undoStack = [];
 let redoStack = [];
 
@@ -102,9 +104,34 @@ let panX = 0;
 let panY = 0;
 
 // Trạng thái công cụ
-let currentTool = 'pen';
+let currentTool = 'pen'; // 'pen' | 'eraser' | 'lasso'
 let currentColor = '#1a1a1a';
 let currentWidth = 5;
+
+// Trạng thái Công cụ Lasso & Lựa chọn Đối tượng
+let lassoBtn = document.getElementById('lassoBtn');
+let selectionActions = document.getElementById('selectionActions');
+let deleteSelectionBtn = document.getElementById('deleteSelectionBtn');
+let copySelectionBtn = document.getElementById('copySelectionBtn');
+let deselectBtn = document.getElementById('deselectBtn');
+
+let lassoPath = null;
+let selectedObjectIds = new Set();
+let selectionBounds = null; // { minX, minY, maxX, maxY }
+
+// Tương tác dời / co giãn vùng chọn
+let isManipulatingSelection = false;
+let manipulationType = null; // 'move' | 'scale'
+let activeHandle = null;
+let manipulationOrigin = null;
+let initialHandleDist = 0;
+let initialDiagonalUnit = null;
+let dragStartPaperPt = null;
+let manipulationSnapshots = null;
+let manipulationInitialBounds = null;
+
+// Bộ nhớ đệm Sao chép / Dán đối tượng
+let inMemoryClipboard = null;
 
 // DOM Elements
 const noteListView = document.getElementById('noteListView');
@@ -208,6 +235,7 @@ function showEditorView() {
 }
 
 async function showNotesListView() {
+  deselectObjects();
   // Lưu ngay ghi chú đang viết dở trước khi ra danh sách
   await performSave();
 
@@ -711,22 +739,31 @@ async function openNote(noteId) {
     currentNoteFolderId = note.folderId || null;
     currentNoteCreatedAt = note.createdAt || Date.now();
 
-    pages = (note.pages || []).map((p, idx) => ({
-      id: p.id || `page_${idx + 1}`,
-      config: {
-        background: p.config?.background || 'white',
-        pattern: p.config?.pattern || 'none',
-        spacing: p.config?.spacing || 'medium',
-        orientation: p.config?.orientation || 'portrait'
-      },
-      strokes: (p.strokes || []).map(s => {
-        s.aabb = computeStrokeAABB(s);
-        return s;
-      }),
-      view: p.view || { zoom: 1.0, panX: 0, panY: 0 },
-      undoStack: [],
-      redoStack: []
-    }));
+    pages = (note.pages || []).map((p, idx) => {
+      const rawList = p.objects || p.strokes || [];
+      const cleanObjects = rawList.map(o => {
+        const item = { ...o };
+        if (!item.id) item.id = 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+        if (!item.type) item.type = 'stroke';
+        if (!item.aabb) item.aabb = computeStrokeAABB(item);
+        return item;
+      });
+
+      return {
+        id: p.id || `page_${idx + 1}`,
+        config: {
+          background: p.config?.background || 'white',
+          pattern: p.config?.pattern || 'none',
+          spacing: p.config?.spacing || 'medium',
+          orientation: p.config?.orientation || 'portrait'
+        },
+        objects: cleanObjects,
+        strokes: cleanObjects,
+        view: p.view || { zoom: 1.0, panX: 0, panY: 0 },
+        undoStack: [],
+        redoStack: []
+      };
+    });
 
     if (pages.length === 0) {
       pages = [createNewPageObject()];
@@ -780,7 +817,8 @@ function saveActivePageState() {
   const p = pages[currentPageIndex];
   if (!p) return;
   p.config = { ...pageConfig };
-  p.strokes = [...strokes];
+  p.objects = [...pageObjects];
+  p.strokes = pageObjects.filter(o => o.type === 'stroke');
   p.view = { zoom, panX, panY };
   p.undoStack = [...undoStack];
   p.redoStack = [...redoStack];
@@ -790,14 +828,21 @@ function loadActivePageState() {
   const p = pages[currentPageIndex];
   if (!p) return;
 
+  deselectObjects();
+
   pageConfig = { ...p.config };
   if (!pageConfig.orientation) pageConfig.orientation = 'portrait';
 
-  strokes = [];
-  for (const s of p.strokes) {
-    if (!s.aabb) s.aabb = computeStrokeAABB(s);
-    strokes.push(s);
+  pageObjects = [];
+  const rawList = p.objects || p.strokes || [];
+  for (const s of rawList) {
+    const item = { ...s };
+    if (!item.id) item.id = 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+    if (!item.type) item.type = 'stroke';
+    if (!item.aabb) item.aabb = computeStrokeAABB(item);
+    pageObjects.push(item);
   }
+  strokes = pageObjects;
 
   undoStack = p.undoStack ? [...p.undoStack] : [];
   redoStack = p.redoStack ? [...p.redoStack] : [];
@@ -920,8 +965,9 @@ function drawThumbnailCanvas(thumbCanvas, page) {
   tCtx.rect(0, 0, pWidth, pHeight);
   tCtx.clip();
 
-  for (let i = 0; i < page.strokes.length; i++) {
-    drawStroke(tCtx, page.strokes[i]);
+  const list = page.objects || page.strokes || [];
+  for (let i = 0; i < list.length; i++) {
+    drawObject(tCtx, list[i]);
   }
   tCtx.restore();
 
@@ -1078,9 +1124,17 @@ function setTool(tool) {
   currentTool = tool;
   if (penBtn) penBtn.classList.toggle('active', tool === 'pen');
   if (eraserBtn) eraserBtn.classList.toggle('active', tool === 'eraser');
+  if (lassoBtn) lassoBtn.classList.toggle('active', tool === 'lasso');
+
+  if (tool !== 'lasso') {
+    deselectObjects();
+  }
 
   if (tool === 'eraser') {
     canvas.style.cursor = 'none';
+  } else if (tool === 'lasso') {
+    canvas.style.cursor = 'default';
+    if (eraserCursor) eraserCursor.style.display = 'none';
   } else {
     canvas.style.cursor = 'crosshair';
     if (eraserCursor) eraserCursor.style.display = 'none';
@@ -1197,20 +1251,34 @@ async function performSave() {
       createdAt: currentNoteCreatedAt || Date.now(),
       updatedAt: Date.now(),
       thumbnail: page1ThumbUrl,
-      pages: pages.map(p => ({
-        id: p.id,
-        config: { ...p.config },
-        strokes: p.strokes.map(s => ({
-          points: s.points,
-          color: s.color,
-          baseWidth: s.baseWidth
-        })),
-        view: {
-          zoom: p.view ? p.view.zoom : 1.0,
-          panX: p.view ? p.view.panX : 0,
-          panY: p.view ? p.view.panY : 0
-        }
-      }))
+      pages: pages.map(p => {
+        const rawList = p.objects || p.strokes || [];
+        const cleanObjects = rawList.map(o => ({
+          id: o.id || ('obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6)),
+          type: o.type || 'stroke',
+          points: o.points || [],
+          color: o.color || '#1a1a1a',
+          baseWidth: o.baseWidth || 5,
+          ...(o.type && o.type !== 'stroke' ? o : {})
+        }));
+        return {
+          id: p.id,
+          config: { ...p.config },
+          objects: cleanObjects,
+          strokes: cleanObjects.filter(o => o.type === 'stroke').map(s => ({
+            id: s.id,
+            type: s.type || 'stroke',
+            points: s.points,
+            color: s.color,
+            baseWidth: s.baseWidth
+          })),
+          view: {
+            zoom: p.view ? p.view.zoom : 1.0,
+            panX: p.view ? p.view.panX : 0,
+            panY: p.view ? p.view.panY : 0
+          }
+        };
+      })
     };
 
     if (window.InkStorage) {
@@ -1431,6 +1499,313 @@ function drawStroke(targetCtx, stroke) {
   targetCtx.restore();
 }
 
+// ==========================================
+// 10b. Hệ thống Đối tượng (Objects) & Công cụ Lasso
+// ==========================================
+
+function drawObject(targetCtx, obj) {
+  if (!obj) return;
+  if (obj.type === 'stroke') {
+    drawStroke(targetCtx, obj);
+  }
+}
+
+function getObjectBounds(obj) {
+  if (!obj) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  if (obj.aabb) return obj.aabb;
+  if (obj.type === 'stroke') {
+    obj.aabb = computeStrokeAABB(obj);
+    return obj.aabb;
+  }
+  if (obj.x !== undefined && obj.y !== undefined && obj.width !== undefined && obj.height !== undefined) {
+    return { minX: obj.x, minY: obj.y, maxX: obj.x + obj.width, maxY: obj.y + obj.height };
+  }
+  return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+}
+
+function cloneObject(obj, newId = false) {
+  const cloned = JSON.parse(JSON.stringify(obj));
+  if (newId) {
+    cloned.id = 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+  }
+  return cloned;
+}
+
+function transformObject(obj, { dx = 0, dy = 0, scale = 1, originX = 0, originY = 0 }) {
+  if (!obj) return;
+  if (obj.type === 'stroke') {
+    if (scale !== 1) {
+      obj.points = obj.points.map(pt => ({
+        x: originX + (pt.x - originX) * scale + dx,
+        y: originY + (pt.y - originY) * scale + dy,
+        pressure: pt.pressure
+      }));
+      obj.baseWidth = Math.max(1, (obj.baseWidth || 5) * scale);
+    } else if (dx !== 0 || dy !== 0) {
+      obj.points = obj.points.map(pt => ({
+        x: pt.x + dx,
+        y: pt.y + dy,
+        pressure: pt.pressure
+      }));
+    }
+    obj.aabb = computeStrokeAABB(obj);
+  } else {
+    if (obj.x !== undefined && obj.y !== undefined) {
+      if (scale !== 1) {
+        obj.x = originX + (obj.x - originX) * scale + dx;
+        obj.y = originY + (obj.y - originY) * scale + dy;
+        if (obj.width) obj.width *= scale;
+        if (obj.height) obj.height *= scale;
+      } else {
+        obj.x += dx;
+        obj.y += dy;
+      }
+      obj.aabb = getObjectBounds(obj);
+    }
+  }
+}
+
+function applyObjectSnapshots(snapshots) {
+  if (!snapshots) return;
+  const map = new Map(snapshots.map(s => [s.id, s]));
+  for (let i = 0; i < pageObjects.length; i++) {
+    const snap = map.get(pageObjects[i].id);
+    if (snap) {
+      pageObjects[i] = cloneObject(snap);
+      pageObjects[i].aabb = computeStrokeAABB(pageObjects[i]);
+    }
+  }
+}
+
+function isPointInPolygon(px, py, polygon) {
+  if (!polygon || polygon.length < 3) return false;
+  let inside = false;
+  const n = polygon.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    const intersect = ((yi > py) !== (yj > py)) &&
+      (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function isObjectSelectedByLasso(obj, polygon) {
+  if (obj.type === 'stroke' && Array.isArray(obj.points) && obj.points.length > 0) {
+    const pts = obj.points;
+    let insideCount = 0;
+    const step = pts.length > 80 ? Math.ceil(pts.length / 40) : 1;
+    let sampled = 0;
+    for (let i = 0; i < pts.length; i += step) {
+      sampled++;
+      if (isPointInPolygon(pts[i].x, pts[i].y, polygon)) {
+        insideCount++;
+      }
+    }
+    return (insideCount / sampled) >= 0.5;
+  } else {
+    const b = getObjectBounds(obj);
+    const cx = (b.minX + b.maxX) / 2;
+    const cy = (b.minY + b.maxY) / 2;
+    return isPointInPolygon(cx, cy, polygon);
+  }
+}
+
+function computeSelectionBounds() {
+  if (selectedObjectIds.size === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let count = 0;
+  for (const obj of pageObjects) {
+    if (selectedObjectIds.has(obj.id)) {
+      const b = getObjectBounds(obj);
+      if (b.minX < minX) minX = b.minX;
+      if (b.minY < minY) minY = b.minY;
+      if (b.maxX > maxX) maxX = b.maxX;
+      if (b.maxY > maxY) maxY = b.maxY;
+      count++;
+    }
+  }
+  if (count === 0) return null;
+  const pad = 6;
+  return {
+    minX: minX - pad,
+    minY: minY - pad,
+    maxX: maxX + pad,
+    maxY: maxY + pad
+  };
+}
+
+function getSelectionHandleAtScreenPoint(screenX, screenY) {
+  if (!selectionBounds) return null;
+  const rect = canvas.getBoundingClientRect();
+  const { minX, minY, maxX, maxY } = selectionBounds;
+
+  const handles = [
+    { type: 'tl', paperX: minX, paperY: minY, originX: maxX, originY: maxY },
+    { type: 'tr', paperX: maxX, paperY: minY, originX: minX, originY: maxY },
+    { type: 'br', paperX: maxX, paperY: maxY, originX: minX, originY: minY },
+    { type: 'bl', paperX: minX, paperY: maxY, originX: maxX, originY: minY }
+  ];
+
+  const HIT_RADIUS_SCREEN = 20;
+
+  for (const h of handles) {
+    const hScreenX = rect.left + panX + h.paperX * zoom;
+    const hScreenY = rect.top + panY + h.paperY * zoom;
+    const dist = Math.hypot(screenX - hScreenX, screenY - hScreenY);
+    if (dist <= HIT_RADIUS_SCREEN) {
+      return h;
+    }
+  }
+  return null;
+}
+
+function isPaperPointInsideSelection(paperPt) {
+  if (!selectionBounds) return false;
+  return (
+    paperPt.x >= selectionBounds.minX &&
+    paperPt.x <= selectionBounds.maxX &&
+    paperPt.y >= selectionBounds.minY &&
+    paperPt.y <= selectionBounds.maxY
+  );
+}
+
+function updateSelectionActionsUI() {
+  if (!selectionActions) return;
+  if (!selectionBounds || selectedObjectIds.size === 0) {
+    selectionActions.style.display = 'none';
+    return;
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const screenLeft = rect.left + panX + ((selectionBounds.minX + selectionBounds.maxX) / 2) * zoom;
+  let screenTop = rect.top + panY + selectionBounds.minY * zoom - 44;
+
+  if (screenTop < rect.top + 55) {
+    screenTop = rect.top + panY + selectionBounds.maxY * zoom + 12;
+  }
+
+  selectionActions.style.display = 'flex';
+  selectionActions.style.left = `${screenLeft}px`;
+  selectionActions.style.top = `${screenTop}px`;
+}
+
+function deselectObjects() {
+  if (selectedObjectIds.size > 0 || selectionBounds) {
+    selectedObjectIds.clear();
+    selectionBounds = null;
+    updateSelectionActionsUI();
+    renderAll();
+  }
+}
+
+function deleteSelectedObjects() {
+  if (selectedObjectIds.size === 0) return;
+  const toDelete = new Set(selectedObjectIds);
+  const deletedSnapshots = [];
+  for (let i = 0; i < pageObjects.length; i++) {
+    if (toDelete.has(pageObjects[i].id)) {
+      deletedSnapshots.push({ obj: cloneObject(pageObjects[i]), index: i });
+    }
+  }
+
+  executeAction({
+    type: 'delete_objects',
+    do: () => {
+      const idSet = new Set(deletedSnapshots.map(d => d.obj.id));
+      for (let i = pageObjects.length - 1; i >= 0; i--) {
+        if (idSet.has(pageObjects[i].id)) {
+          pageObjects.splice(i, 1);
+        }
+      }
+      selectedObjectIds.clear();
+      selectionBounds = null;
+      updateSelectionActionsUI();
+      renderAll();
+    },
+    undo: () => {
+      const sorted = [...deletedSnapshots].sort((a, b) => a.index - b.index);
+      for (const item of sorted) {
+        if (item.index <= pageObjects.length) {
+          pageObjects.splice(item.index, 0, cloneObject(item.obj));
+        } else {
+          pageObjects.push(cloneObject(item.obj));
+        }
+      }
+      selectedObjectIds = new Set(deletedSnapshots.map(d => d.obj.id));
+      selectionBounds = computeSelectionBounds();
+      updateSelectionActionsUI();
+      renderAll();
+    }
+  });
+
+  scheduleAutoSave();
+  updateCurrentPageThumbnail();
+}
+
+function copySelectedObjects() {
+  if (selectedObjectIds.size === 0) return;
+  const selected = pageObjects.filter(o => selectedObjectIds.has(o.id));
+  if (selected.length === 0) return;
+  inMemoryClipboard = selected.map(o => cloneObject(o));
+  try {
+    localStorage.setItem('inknote_clipboard', JSON.stringify(inMemoryClipboard));
+  } catch (e) {}
+}
+
+function pasteObjects() {
+  let items = inMemoryClipboard;
+  if (!items) {
+    try {
+      const stored = localStorage.getItem('inknote_clipboard');
+      if (stored) items = JSON.parse(stored);
+    } catch (e) {}
+  }
+  if (!items || !Array.isArray(items) || items.length === 0) return;
+
+  const OFFSET = 35;
+  const newObjects = items.map(item => {
+    const cloned = cloneObject(item, true);
+    transformObject(cloned, { dx: OFFSET, dy: OFFSET });
+    return cloned;
+  });
+
+  executeAction({
+    type: 'paste_objects',
+    do: () => {
+      for (const o of newObjects) {
+        pageObjects.push(o);
+      }
+      selectedObjectIds = new Set(newObjects.map(o => o.id));
+      selectionBounds = computeSelectionBounds();
+      setTool('lasso');
+      updateSelectionActionsUI();
+      renderAll();
+    },
+    undo: () => {
+      const idSet = new Set(newObjects.map(o => o.id));
+      for (let i = pageObjects.length - 1; i >= 0; i--) {
+        if (idSet.has(pageObjects[i].id)) {
+          pageObjects.splice(i, 1);
+        }
+      }
+      selectedObjectIds.clear();
+      selectionBounds = null;
+      updateSelectionActionsUI();
+      renderAll();
+    }
+  });
+
+  inMemoryClipboard = newObjects.map(o => cloneObject(o));
+  try {
+    localStorage.setItem('inknote_clipboard', JSON.stringify(inMemoryClipboard));
+  } catch (e) {}
+
+  scheduleAutoSave();
+  updateCurrentPageThumbnail();
+}
+
 function drawPaperPattern(targetCtx) {
   if (pageConfig.pattern === 'none') return;
 
@@ -1499,15 +1874,70 @@ function renderAll() {
 
   drawPaperPattern(ctx);
 
-  for (let i = 0; i < strokes.length; i++) {
-    drawStroke(ctx, strokes[i]);
+  for (let i = 0; i < pageObjects.length; i++) {
+    drawObject(ctx, pageObjects[i]);
   }
 
   if (currentStroke) {
     drawStroke(ctx, currentStroke);
   }
 
+  // 1. Đường khoanh nét đứt khi đang dùng Lasso
+  if (lassoPath && lassoPath.length > 1) {
+    ctx.save();
+    ctx.strokeStyle = '#0969da';
+    ctx.lineWidth = 1.5 / zoom;
+    ctx.setLineDash([5 / zoom, 5 / zoom]);
+    ctx.beginPath();
+    ctx.moveTo(lassoPath[0].x, lassoPath[0].y);
+    for (let i = 1; i < lassoPath.length; i++) {
+      ctx.lineTo(lassoPath[i].x, lassoPath[i].y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(9, 105, 218, 0.08)';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 2. Khung bao nét đứt và 4 điểm nắm của vùng chọn
+  if (selectionBounds && selectedObjectIds.size > 0) {
+    const { minX, minY, maxX, maxY } = selectionBounds;
+    const w = maxX - minX;
+    const h = maxY - minY;
+
+    ctx.save();
+    ctx.strokeStyle = '#0969da';
+    ctx.lineWidth = 1.5 / zoom;
+    ctx.setLineDash([5 / zoom, 5 / zoom]);
+    ctx.strokeRect(minX, minY, w, h);
+    ctx.restore();
+
+    // 4 Điểm nắm hình tròn cố định trên màn hình (bán kính 5.5px)
+    const handleRadius = 5.5 / zoom;
+    const handles = [
+      { x: minX, y: minY },
+      { x: maxX, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY }
+    ];
+
+    ctx.save();
+    ctx.setLineDash([]);
+    for (const hPt of handles) {
+      ctx.beginPath();
+      ctx.arc(hPt.x, hPt.y, handleRadius, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      ctx.lineWidth = 2 / zoom;
+      ctx.strokeStyle = '#0969da';
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   ctx.restore();
+
+  updateSelectionActionsUI();
 }
 
 // ==========================================
@@ -1759,7 +2189,7 @@ if (deletePageBtn) {
   });
 }
 
-// Chuyển đổi Bút / Tẩy
+// Chuyển đổi Bút / Tẩy / Lasso
 if (penBtn) {
   penBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1780,6 +2210,53 @@ if (eraserBtn) {
   });
 }
 
+if (lassoBtn) {
+  lassoBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setTool('lasso');
+  });
+  lassoBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
+// Các nút trên thanh thao tác nổi cho vùng chọn Lasso
+if (selectionActions) {
+  selectionActions.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
+if (deleteSelectionBtn) {
+  deleteSelectionBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    deleteSelectedObjects();
+  });
+  deleteSelectionBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
+if (copySelectionBtn) {
+  copySelectionBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    copySelectedObjects();
+  });
+  copySelectionBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
+if (deselectBtn) {
+  deselectBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    deselectObjects();
+  });
+  deselectBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
 // Bảng chọn màu
 if (colorPalette) {
   colorPalette.addEventListener('click', (e) => {
@@ -1792,7 +2269,7 @@ if (colorPalette) {
     swatch.classList.add('active');
 
     updateSizeAndColorPreview();
-    if (currentTool === 'eraser') {
+    if (currentTool === 'eraser' || currentTool === 'lasso') {
       setTool('pen');
     }
   });
@@ -1808,7 +2285,7 @@ if (sizeSlider) {
     currentWidth = parseFloat(e.target.value) || 5;
     updateSizeAndColorPreview();
 
-    if (currentTool === 'eraser') {
+    if (currentTool === 'eraser' || currentTool === 'lasso') {
       setTool('pen');
     }
   });
@@ -2084,16 +2561,36 @@ window.addEventListener('keydown', (e) => {
     hideDeleteFolderDialog();
     if (paperMenu) paperMenu.classList.remove('open');
     if (backupMenu) backupMenu.classList.remove('open');
+    deselectObjects();
     return;
   }
 
   // Không nhận phím tắt vẽ khi đang ở màn hình danh sách
   if (noteListView && noteListView.style.display !== 'none') return;
 
+  const activeEl = document.activeElement;
+  const isInputFocused = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+  if (isInputFocused) return;
+
   if ((e.key === 'p' || e.key === 'P') && !e.ctrlKey && !e.altKey) {
     setTool('pen');
   } else if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.altKey) {
     setTool('eraser');
+  } else if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.altKey) {
+    setTool('lasso');
+  } else if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (selectedObjectIds && selectedObjectIds.size > 0) {
+      e.preventDefault();
+      deleteSelectedObjects();
+    }
+  } else if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+    if (selectedObjectIds && selectedObjectIds.size > 0) {
+      e.preventDefault();
+      copySelectedObjects();
+    }
+  } else if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+    e.preventDefault();
+    pasteObjects();
   } else if (e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
     e.preventDefault();
     undo();
@@ -2104,6 +2601,22 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     redo();
   }
+});
+
+window.addEventListener('copy', (e) => {
+  if (noteListView && noteListView.style.display !== 'none') return;
+  const activeEl = document.activeElement;
+  if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) return;
+  if (selectedObjectIds && selectedObjectIds.size > 0) {
+    copySelectedObjects();
+  }
+});
+
+window.addEventListener('paste', (e) => {
+  if (noteListView && noteListView.style.display !== 'none') return;
+  const activeEl = document.activeElement;
+  if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) return;
+  pasteObjects();
 });
 
 // ==========================================
@@ -2156,47 +2669,106 @@ canvas.addEventListener('pointerdown', (e) => {
   const isErasing = currentTool === 'eraser' || isPhysicalEraserTip(e);
 
   e.preventDefault();
-  isInteracting = true;
-  activeInteractionType = isErasing ? 'eraser' : 'pen';
-  activePointerId = e.pointerId;
-
-  try {
-    canvas.setPointerCapture(e.pointerId);
-  } catch (err) {}
-
-  lastScreenX = e.clientX;
-  lastScreenY = e.clientY;
 
   if (isErasing) {
+    isInteracting = true;
+    activeInteractionType = 'eraser';
+    activePointerId = e.pointerId;
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    lastScreenX = e.clientX;
+    lastScreenY = e.clientY;
     updateEraserCursorPosition(e.clientX, e.clientY);
     erasedInCurrentDrag = [];
     checkAndEraseStrokes(paperPt.x, paperPt.y);
-  } else {
-    const rawPressure = (typeof e.pressure === 'number' && e.pressure > 0) ? e.pressure : 0.5;
-    currentStroke = {
-      points: [{ x: paperPt.x, y: paperPt.y, pressure: rawPressure }],
-      color: currentColor,
-      baseWidth: currentWidth,
-      isFinished: false
-    };
-    renderAll();
+    return;
   }
+
+  if (currentTool === 'lasso') {
+    // 1. Kiểm tra bấm vào 4 góc điểm nắm
+    const handleHit = getSelectionHandleAtScreenPoint(e.clientX, e.clientY);
+    if (handleHit && selectedObjectIds.size > 0) {
+      isInteracting = true;
+      activePointerId = e.pointerId;
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      activeInteractionType = 'lasso_manipulate';
+      isManipulatingSelection = true;
+      manipulationType = 'scale';
+      activeHandle = handleHit;
+      manipulationOrigin = { x: handleHit.originX, y: handleHit.originY };
+      initialHandleDist = Math.hypot(handleHit.paperX - handleHit.originX, handleHit.paperY - handleHit.originY);
+      initialDiagonalUnit = {
+        ux: (handleHit.paperX - handleHit.originX) / Math.max(1, initialHandleDist),
+        uy: (handleHit.paperY - handleHit.originY) / Math.max(1, initialHandleDist)
+      };
+      manipulationSnapshots = pageObjects.filter(o => selectedObjectIds.has(o.id)).map(o => cloneObject(o));
+      manipulationInitialBounds = { ...selectionBounds };
+      return;
+    }
+
+    // 2. Kiểm tra bấm vào trong khung bao lựa chọn
+    if (selectionBounds && isPaperPointInsideSelection(paperPt) && selectedObjectIds.size > 0) {
+      isInteracting = true;
+      activePointerId = e.pointerId;
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      activeInteractionType = 'lasso_manipulate';
+      isManipulatingSelection = true;
+      manipulationType = 'move';
+      dragStartPaperPt = { x: paperPt.x, y: paperPt.y };
+      manipulationSnapshots = pageObjects.filter(o => selectedObjectIds.has(o.id)).map(o => cloneObject(o));
+      manipulationInitialBounds = { ...selectionBounds };
+      return;
+    }
+
+    // 3. Chạm ra ngoài khung -> Bỏ chọn & Bắt đầu khoanh vùng mới
+    deselectObjects();
+    isInteracting = true;
+    activePointerId = e.pointerId;
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    activeInteractionType = 'lasso_draw';
+    lassoPath = [{ x: paperPt.x, y: paperPt.y }];
+    renderAll();
+    return;
+  }
+
+  // Chế độ Pen: nếu có vùng chọn đang mở thì bỏ chọn
+  deselectObjects();
+
+  isInteracting = true;
+  activeInteractionType = 'pen';
+  activePointerId = e.pointerId;
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+  lastScreenX = e.clientX;
+  lastScreenY = e.clientY;
+
+  const rawPressure = (typeof e.pressure === 'number' && e.pressure > 0) ? e.pressure : 0.5;
+  currentStroke = {
+    id: 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+    type: 'stroke',
+    points: [{ x: paperPt.x, y: paperPt.y, pressure: rawPressure }],
+    color: currentColor,
+    baseWidth: currentWidth,
+    isFinished: false
+  };
+  renderAll();
 });
 
 function checkAndEraseStrokes(paperX, paperY) {
   const rPaper = ERASER_RADIUS_SCREEN / zoom;
   let hasErased = false;
 
-  for (let i = strokes.length - 1; i >= 0; i--) {
-    const s = strokes[i];
+  for (let i = pageObjects.length - 1; i >= 0; i--) {
+    const s = pageObjects[i];
     if (isStrokeHitByEraser(s, paperX, paperY, rPaper)) {
       erasedInCurrentDrag.push({ stroke: s, originalIndex: i });
-      strokes.splice(i, 1);
+      selectedObjectIds.delete(s.id);
+      pageObjects.splice(i, 1);
       hasErased = true;
     }
   }
 
   if (hasErased) {
+    selectionBounds = computeSelectionBounds();
+    updateSelectionActionsUI();
     renderAll();
   }
 }
@@ -2212,20 +2784,68 @@ canvas.addEventListener('pointermove', (e) => {
 
   e.preventDefault();
 
-  const events = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents().length > 0)
-    ? e.getCoalescedEvents()
-    : [e];
-
   if (activeInteractionType === 'eraser') {
     updateEraserCursorPosition(e.clientX, e.clientY);
-
+    const events = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents().length > 0)
+      ? e.getCoalescedEvents()
+      : [e];
     for (const ev of events) {
       const pt = getPaperPoint(ev);
       checkAndEraseStrokes(pt.x, pt.y);
     }
-  } else {
-    let hasNewPoints = false;
+  } else if (activeInteractionType === 'lasso_draw') {
+    const pt = getPaperPoint(e);
+    if (!lassoPath) lassoPath = [];
+    lassoPath.push(pt);
+    renderAll();
+  } else if (activeInteractionType === 'lasso_manipulate') {
+    const paperPt = getPaperPoint(e);
+    if (manipulationType === 'move' && dragStartPaperPt && manipulationSnapshots) {
+      const dx = paperPt.x - dragStartPaperPt.x;
+      const dy = paperPt.y - dragStartPaperPt.y;
+      for (const snap of manipulationSnapshots) {
+        const obj = pageObjects.find(o => o.id === snap.id);
+        if (obj && obj.type === 'stroke') {
+          obj.points = snap.points.map(p => ({ x: p.x + dx, y: p.y + dy, pressure: p.pressure }));
+          obj.aabb = computeStrokeAABB(obj);
+        }
+      }
+      if (manipulationInitialBounds) {
+        selectionBounds = {
+          minX: manipulationInitialBounds.minX + dx,
+          maxX: manipulationInitialBounds.maxX + dx,
+          minY: manipulationInitialBounds.minY + dy,
+          maxY: manipulationInitialBounds.maxY + dy
+        };
+      }
+      renderAll();
+    } else if (manipulationType === 'scale' && manipulationOrigin && manipulationSnapshots && initialDiagonalUnit) {
+      const ox = manipulationOrigin.x, oy = manipulationOrigin.y;
+      const { ux, uy } = initialDiagonalUnit;
+      const proj = (paperPt.x - ox) * ux + (paperPt.y - oy) * uy;
+      const scale = Math.max(0.05, proj / Math.max(1, initialHandleDist));
 
+      for (const snap of manipulationSnapshots) {
+        const obj = pageObjects.find(o => o.id === snap.id);
+        if (obj && obj.type === 'stroke') {
+          obj.points = snap.points.map(p => ({
+            x: ox + (p.x - ox) * scale,
+            y: oy + (p.y - oy) * scale,
+            pressure: p.pressure
+          }));
+          obj.baseWidth = Math.max(1, (snap.baseWidth || 5) * scale);
+          obj.aabb = computeStrokeAABB(obj);
+        }
+      }
+      selectionBounds = computeSelectionBounds();
+      renderAll();
+    }
+  } else if (currentStroke) {
+    const events = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents().length > 0)
+      ? e.getCoalescedEvents()
+      : [e];
+
+    let hasNewPoints = false;
     for (const ev of events) {
       if (ev.pointerType !== 'pen' && ev.pointerType !== 'eraser') continue;
 
@@ -2279,24 +2899,94 @@ function handlePointerEnd(e) {
         erasedList: erasedList,
         do: () => {
           for (let i = 0; i < erasedList.length; i++) {
-            const idx = strokes.indexOf(erasedList[i].stroke);
-            if (idx !== -1) strokes.splice(idx, 1);
+            const idx = pageObjects.indexOf(erasedList[i].stroke);
+            if (idx !== -1) pageObjects.splice(idx, 1);
           }
         },
         undo: () => {
           const sorted = [...erasedList].sort((a, b) => a.originalIndex - b.originalIndex);
           for (let i = 0; i < sorted.length; i++) {
             const item = sorted[i];
-            if (item.originalIndex <= strokes.length) {
-              strokes.splice(item.originalIndex, 0, item.stroke);
+            if (item.originalIndex <= pageObjects.length) {
+              pageObjects.splice(item.originalIndex, 0, item.stroke);
             } else {
-              strokes.push(item.stroke);
+              pageObjects.push(item.stroke);
             }
           }
         }
       });
     }
     erasedInCurrentDrag = [];
+  } else if (activeInteractionType === 'lasso_draw') {
+    if (lassoPath && lassoPath.length > 2) {
+      const selected = [];
+      for (const obj of pageObjects) {
+        if (isObjectSelectedByLasso(obj, lassoPath)) {
+          selected.push(obj);
+        }
+      }
+      if (selected.length > 0) {
+        selectedObjectIds = new Set(selected.map(o => o.id));
+        selectionBounds = computeSelectionBounds();
+      } else {
+        selectedObjectIds.clear();
+        selectionBounds = null;
+      }
+    } else {
+      selectedObjectIds.clear();
+      selectionBounds = null;
+    }
+    lassoPath = null;
+    updateSelectionActionsUI();
+    renderAll();
+  } else if (activeInteractionType === 'lasso_manipulate') {
+    const beforeSnapshots = manipulationSnapshots;
+    const afterSnapshots = pageObjects.filter(o => selectedObjectIds.has(o.id)).map(o => cloneObject(o));
+
+    if (beforeSnapshots && beforeSnapshots.length > 0) {
+      let hasChanged = false;
+      for (let i = 0; i < beforeSnapshots.length; i++) {
+        const b = beforeSnapshots[i];
+        const a = afterSnapshots.find(o => o.id === b.id);
+        if (a && b) {
+          if (Math.abs((a.baseWidth || 5) - (b.baseWidth || 5)) > 0.01 ||
+              Math.abs(a.aabb.minX - b.aabb.minX) > 0.1 ||
+              Math.abs(a.aabb.minY - b.aabb.minY) > 0.1 ||
+              Math.abs(a.aabb.maxX - b.aabb.maxX) > 0.1 ||
+              Math.abs(a.aabb.maxY - b.aabb.maxY) > 0.1) {
+            hasChanged = true;
+            break;
+          }
+        }
+      }
+
+      if (hasChanged) {
+        executeAction({
+          type: 'manipulate_objects',
+          do: () => {
+            applyObjectSnapshots(afterSnapshots);
+            selectionBounds = computeSelectionBounds();
+            updateSelectionActionsUI();
+            renderAll();
+          },
+          undo: () => {
+            applyObjectSnapshots(beforeSnapshots);
+            selectionBounds = computeSelectionBounds();
+            updateSelectionActionsUI();
+            renderAll();
+          }
+        });
+      }
+    }
+
+    isManipulatingSelection = false;
+    manipulationType = null;
+    activeHandle = null;
+    manipulationOrigin = null;
+    manipulationSnapshots = null;
+    manipulationInitialBounds = null;
+    updateSelectionActionsUI();
+    renderAll();
   } else if (currentStroke) {
     currentStroke.isFinished = true;
     currentStroke.aabb = computeStrokeAABB(currentStroke);
@@ -2306,12 +2996,12 @@ function handlePointerEnd(e) {
       type: 'add_stroke',
       stroke: finishedStroke,
       do: () => {
-        strokes.push(finishedStroke);
+        pageObjects.push(finishedStroke);
       },
       undo: () => {
-        const idx = strokes.indexOf(finishedStroke);
+        const idx = pageObjects.indexOf(finishedStroke);
         if (idx !== -1) {
-          strokes.splice(idx, 1);
+          pageObjects.splice(idx, 1);
         }
       }
     });

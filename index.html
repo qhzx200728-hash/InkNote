@@ -161,6 +161,15 @@
             </svg>
           </button>
 
+          <!-- Nút chọn Lasso (L) -->
+          <button id="lassoBtn" class="tool-btn" title="Chọn vùng Lasso (L)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 22a5 5 0 0 1-2-4"></path>
+              <path d="M3.3 14A6.8 6.8 0 0 1 2 10c0-4.4 4.5-8 10-8s10 3.6 10 8-4.5 8-10 8a12 12 0 0 1-5-1"></path>
+              <path d="M5 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"></path>
+            </svg>
+          </button>
+
           <div class="toolbar-divider"></div>
 
           <!-- Bảng 10 màu có sẵn -->
@@ -280,6 +289,27 @@
 
         <!-- Vòng tròn chỉ thị vị trí đầu tẩy -->
         <div id="eraserCursor"></div>
+
+        <!-- Thanh thao tác nổi cho vùng chọn Lasso -->
+        <div id="selectionActions" class="selection-actions" style="display: none;">
+          <button id="deleteSelectionBtn" class="selection-action-btn delete-btn" title="Xóa nét đã chọn (Delete)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            Xóa
+          </button>
+          <button id="copySelectionBtn" class="selection-action-btn" title="Sao chép nét đã chọn (Ctrl+C)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            Sao chép
+          </button>
+          <button id="deselectBtn" class="selection-action-btn" title="Bỏ chọn">
+            ✕
+          </button>
+        </div>
 
         <!-- Canvas bao trọn màn hình -->
         <canvas id="inkCanvas"></canvas>
