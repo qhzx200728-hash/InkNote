@@ -114,6 +114,29 @@ let shapeMenu = document.getElementById('shapeMenu');
 let currentShapeType = 'line_solid';
 let currentShapeDrawing = null;
 
+// Trạng thái Thước kẻ ảo (Ruler)
+let rulerBtn = document.getElementById('rulerBtn');
+let isRulerActive = false;
+const RULER_CM_UNIT = 1200 / 21; // ~57.142857 page units / cm (A4 quy ước 21cm = 1200 đơn vị)
+const RULER_MM_UNIT = RULER_CM_UNIT / 10;
+const RULER_TOTAL_CM = 15;
+const RULER_START_PAD = 35;
+const RULER_LENGTH = RULER_TOTAL_CM * RULER_CM_UNIT + RULER_START_PAD * 2;
+const RULER_WIDTH = 110;
+
+let ruler = {
+  cx: 600,
+  cy: 700,
+  angle: 0,
+  length: RULER_LENGTH,
+  width: RULER_WIDTH,
+  isRotating: false,
+  isMoving: false,
+  isSnapped: true
+};
+let currentRulerLine = null;
+let rulerDragOffset = { dx: 0, dy: 0 };
+
 // Trạng thái Công cụ Lasso & Lựa chọn Đối tượng
 let lassoBtn = document.getElementById('lassoBtn');
 let selectionActions = document.getElementById('selectionActions');
@@ -2231,6 +2254,315 @@ function drawPaperPattern(targetCtx) {
   targetCtx.restore();
 }
 
+// ==========================================
+// 10c. Công cụ Thước kẻ ảo (Virtual Ruler)
+// ==========================================
+
+function toggleRuler() {
+  isRulerActive = !isRulerActive;
+  if (rulerBtn) {
+    rulerBtn.classList.toggle('active', isRulerActive);
+  }
+  renderAll();
+}
+
+function paperToRulerLocal(px, py) {
+  const dx = px - ruler.cx;
+  const dy = py - ruler.cy;
+  const cos = Math.cos(ruler.angle);
+  const sin = Math.sin(ruler.angle);
+  return {
+    x: dx * cos + dy * sin,
+    y: -dx * sin + dy * cos
+  };
+}
+
+function rulerLocalToPaper(lx, ly) {
+  const cos = Math.cos(ruler.angle);
+  const sin = Math.sin(ruler.angle);
+  return {
+    x: ruler.cx + lx * cos - ly * sin,
+    y: ruler.cy + lx * sin + ly * cos
+  };
+}
+
+function hitTestRuler(paperPt) {
+  if (!isRulerActive) return null;
+
+  const localPt = paperToRulerLocal(paperPt.x, paperPt.y);
+  const halfL = ruler.length / 2;
+  const halfW = ruler.width / 2;
+
+  // 1. Kiểm tra điểm nắm xoay ở đầu bên phải: (halfL - 26, 0)
+  const handleX = halfL - 26;
+  const handleY = 0;
+  const distHandle = Math.hypot(localPt.x - handleX, localPt.y - handleY);
+  const handleRadiusPaper = Math.max(22 / zoom, 20);
+  if (distHandle <= handleRadiusPaper) {
+    return { hit: 'rotate', localPt };
+  }
+
+  // 2. Kiểm tra kẻ theo cạnh thước (trong khoảng ~20-22 pixel màn hình)
+  // Chỉ kích hoạt khi công cụ là Bút hoặc Đường thẳng/Mũi tên
+  const canDrawWithRuler = currentTool === 'pen' || (
+    currentTool === 'shape' && (
+      currentShapeType.startsWith('line_') ||
+      currentShapeType.startsWith('arrow_')
+    )
+  );
+
+  const edgeThresholdPaper = 22 / zoom;
+
+  if (canDrawWithRuler) {
+    if (localPt.x >= -halfL - edgeThresholdPaper && localPt.x <= halfL + edgeThresholdPaper) {
+      const distTop = Math.abs(localPt.y - (-halfW));
+      const distBottom = Math.abs(localPt.y - halfW);
+
+      if (distTop <= edgeThresholdPaper && distTop <= distBottom) {
+        return {
+          hit: 'edge',
+          edge: 'top',
+          edgeY: -halfW,
+          localPt
+        };
+      }
+      if (distBottom <= edgeThresholdPaper && distBottom < distTop) {
+        return {
+          hit: 'edge',
+          edge: 'bottom',
+          edgeY: halfW,
+          localPt
+        };
+      }
+    }
+  }
+
+  // 3. Kiểm tra chạm vào thân thước để di chuyển
+  if (localPt.x >= -halfL && localPt.x <= halfL && localPt.y >= -halfW && localPt.y <= halfW) {
+    return { hit: 'body', localPt };
+  }
+
+  return null;
+}
+
+function updateRulerAngleFromPointer(paperPt) {
+  const dx = paperPt.x - ruler.cx;
+  const dy = paperPt.y - ruler.cy;
+  const rawAngle = Math.atan2(dy, dx);
+  const deg = rawAngle * (180 / Math.PI);
+
+  // Hút (snap) vào 0, 45, 90, 135, 180, -45, -90, -135, -180 độ
+  const snapStep = 45;
+  const snappedDeg = Math.round(deg / snapStep) * snapStep;
+  const diff = Math.abs(deg - snappedDeg);
+  const snapThresholdDeg = 3.5;
+
+  if (diff <= snapThresholdDeg) {
+    ruler.angle = snappedDeg * (Math.PI / 180);
+    ruler.isSnapped = true;
+  } else {
+    ruler.angle = rawAngle;
+    ruler.isSnapped = false;
+  }
+}
+
+function drawRulerLinePreview(targetCtx, line) {
+  if (!line) return;
+  const p1 = rulerLocalToPaper(line.startLocalX, line.edgeY);
+  const p2 = rulerLocalToPaper(line.endLocalX, line.edgeY);
+  drawShape(targetCtx, {
+    shapeType: line.shapeType,
+    startPt: p1,
+    endPt: p2,
+    color: line.color,
+    baseWidth: line.baseWidth
+  });
+}
+
+function drawRuler(targetCtx) {
+  targetCtx.save();
+  targetCtx.translate(ruler.cx, ruler.cy);
+  targetCtx.rotate(ruler.angle);
+
+  const halfL = ruler.length / 2;
+  const halfW = ruler.width / 2;
+
+  // 1. Thân thước bán trong suốt (frosted acrylic)
+  targetCtx.save();
+  targetCtx.shadowColor = 'rgba(0, 0, 0, 0.16)';
+  targetCtx.shadowBlur = 10 / zoom;
+  targetCtx.shadowOffsetY = 3 / zoom;
+
+  targetCtx.beginPath();
+  if (typeof targetCtx.roundRect === 'function') {
+    targetCtx.roundRect(-halfL, -halfW, ruler.length, ruler.width, 6);
+  } else {
+    targetCtx.rect(-halfL, -halfW, ruler.length, ruler.width);
+  }
+  targetCtx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+  targetCtx.fill();
+  targetCtx.restore();
+
+  // Viền thước
+  targetCtx.save();
+  targetCtx.beginPath();
+  if (typeof targetCtx.roundRect === 'function') {
+    targetCtx.roundRect(-halfL, -halfW, ruler.length, ruler.width, 6);
+  } else {
+    targetCtx.rect(-halfL, -halfW, ruler.length, ruler.width);
+  }
+  targetCtx.strokeStyle = 'rgba(100, 116, 139, 0.5)';
+  targetCtx.lineWidth = 1.2 / zoom;
+  targetCtx.stroke();
+  targetCtx.restore();
+
+  // 2. Vạch chia cm và mm ở cạnh trên
+  const startX = -halfL + RULER_START_PAD;
+  targetCtx.save();
+  targetCtx.textAlign = 'center';
+  targetCtx.textBaseline = 'top';
+
+  for (let cm = 0; cm <= RULER_TOTAL_CM; cm++) {
+    const cmX = startX + cm * RULER_CM_UNIT;
+
+    // Vạch chính cm
+    targetCtx.beginPath();
+    targetCtx.moveTo(cmX, -halfW);
+    targetCtx.lineTo(cmX, -halfW + 22);
+    targetCtx.strokeStyle = '#1e293b';
+    targetCtx.lineWidth = 1.5 / zoom;
+    targetCtx.stroke();
+
+    // Số cm (kích thước đọc rõ)
+    const fontSize = Math.max(10 / zoom, 12);
+    targetCtx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+    targetCtx.fillStyle = '#0f172a';
+    targetCtx.fillText(cm.toString(), cmX, -halfW + 25);
+
+    // Vạch mm
+    if (cm < RULER_TOTAL_CM) {
+      for (let mm = 1; mm < 10; mm++) {
+        const mmX = cmX + mm * RULER_MM_UNIT;
+        const isHalf = (mm === 5);
+        const tickH = isHalf ? 14 : 8;
+
+        targetCtx.beginPath();
+        targetCtx.moveTo(mmX, -halfW);
+        targetCtx.lineTo(mmX, -halfW + tickH);
+        targetCtx.strokeStyle = isHalf ? '#475569' : '#94a3b8';
+        targetCtx.lineWidth = (isHalf ? 1.2 : 0.8) / zoom;
+        targetCtx.stroke();
+      }
+    }
+  }
+  targetCtx.restore();
+
+  // 3. Vạch chia phụ ở cạnh dưới (căn kẻ thuận tiện ở cả 2 cạnh)
+  targetCtx.save();
+  for (let cm = 0; cm <= RULER_TOTAL_CM; cm++) {
+    const cmX = startX + cm * RULER_CM_UNIT;
+    targetCtx.beginPath();
+    targetCtx.moveTo(cmX, halfW);
+    targetCtx.lineTo(cmX, halfW - 12);
+    targetCtx.strokeStyle = '#64748b';
+    targetCtx.lineWidth = 1.2 / zoom;
+    targetCtx.stroke();
+
+    if (cm < RULER_TOTAL_CM) {
+      const halfMmX = cmX + 5 * RULER_MM_UNIT;
+      targetCtx.beginPath();
+      targetCtx.moveTo(halfMmX, halfW);
+      targetCtx.lineTo(halfMmX, halfW - 7);
+      targetCtx.strokeStyle = '#94a3b8';
+      targetCtx.lineWidth = 0.8 / zoom;
+      targetCtx.stroke();
+    }
+  }
+  targetCtx.restore();
+
+  // 4. Biểu thị góc nghiêng (độ) ở tâm thước
+  const deg = Math.round((((ruler.angle * 180 / Math.PI) % 360) + 360) % 360);
+  const pillW = 62;
+  const pillH = 26;
+  targetCtx.save();
+  targetCtx.beginPath();
+  if (typeof targetCtx.roundRect === 'function') {
+    targetCtx.roundRect(-pillW / 2, -pillH / 2, pillW, pillH, 13);
+  } else {
+    targetCtx.rect(-pillW / 2, -pillH / 2, pillW, pillH);
+  }
+  targetCtx.fillStyle = ruler.isRotating ? (ruler.isSnapped ? '#0969da' : '#1e293b') : 'rgba(241, 245, 249, 0.92)';
+  targetCtx.fill();
+  targetCtx.strokeStyle = ruler.isRotating ? '#ffffff' : '#cbd5e1';
+  targetCtx.lineWidth = 1 / zoom;
+  targetCtx.stroke();
+
+  targetCtx.textAlign = 'center';
+  targetCtx.textBaseline = 'middle';
+  const pillFontSize = Math.max(10 / zoom, 12);
+  targetCtx.font = `bold ${pillFontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+  targetCtx.fillStyle = ruler.isRotating ? '#ffffff' : '#334155';
+  targetCtx.fillText(`${deg}°`, 0, 0);
+  targetCtx.restore();
+
+  // 5. Nút xoay (Rotation Handle) ở đầu bên phải
+  const handleX = halfL - 26;
+  const handleY = 0;
+  const handleR = 16;
+
+  targetCtx.save();
+  targetCtx.shadowColor = 'rgba(0, 0, 0, 0.15)';
+  targetCtx.shadowBlur = 4 / zoom;
+  targetCtx.beginPath();
+  targetCtx.arc(handleX, handleY, handleR, 0, Math.PI * 2);
+  targetCtx.fillStyle = ruler.isRotating ? '#0969da' : '#ffffff';
+  targetCtx.fill();
+  targetCtx.strokeStyle = '#0969da';
+  targetCtx.lineWidth = 2 / zoom;
+  targetCtx.stroke();
+
+  // Biểu tượng xoay vòng cung
+  targetCtx.save();
+  targetCtx.translate(handleX, handleY);
+  targetCtx.strokeStyle = ruler.isRotating ? '#ffffff' : '#0969da';
+  targetCtx.fillStyle = ruler.isRotating ? '#ffffff' : '#0969da';
+  targetCtx.lineWidth = 1.6 / zoom;
+
+  targetCtx.beginPath();
+  targetCtx.arc(0, 0, 7.5, -Math.PI * 0.8, -Math.PI * 0.1);
+  targetCtx.stroke();
+  targetCtx.beginPath();
+  targetCtx.arc(0, 0, 7.5, Math.PI * 0.2, Math.PI * 0.9);
+  targetCtx.stroke();
+  targetCtx.restore();
+
+  // 6. Nhãn nổi góc xoay khi đang xoay
+  if (ruler.isRotating) {
+    const floatW = 64;
+    const floatH = 26;
+    const floatY = -halfW - 20;
+    targetCtx.save();
+    targetCtx.shadowColor = 'rgba(0, 0, 0, 0.25)';
+    targetCtx.shadowBlur = 6 / zoom;
+    targetCtx.fillStyle = ruler.isSnapped ? '#0969da' : '#1e293b';
+    targetCtx.beginPath();
+    if (typeof targetCtx.roundRect === 'function') {
+      targetCtx.roundRect(-floatW / 2, floatY - floatH / 2, floatW, floatH, 6);
+    } else {
+      targetCtx.rect(-floatW / 2, floatY - floatH / 2, floatW, floatH);
+    }
+    targetCtx.fill();
+    targetCtx.textAlign = 'center';
+    targetCtx.textBaseline = 'middle';
+    targetCtx.font = `bold ${pillFontSize}px sans-serif`;
+    targetCtx.fillStyle = '#ffffff';
+    targetCtx.fillText(`${deg}°`, 0, floatY);
+    targetCtx.restore();
+  }
+
+  targetCtx.restore();
+}
+
 function renderAll() {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -2331,6 +2663,18 @@ function renderAll() {
   }
 
   ctx.restore();
+
+  // 3. Vẽ Thước kẻ ảo (Ruler) & Nét kẻ xem trước nếu đang bật Thước
+  if (isRulerActive) {
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(zoom, zoom);
+    if (currentRulerLine) {
+      drawRulerLinePreview(ctx, currentRulerLine);
+    }
+    drawRuler(ctx);
+    ctx.restore();
+  }
 
   updateSelectionActionsUI();
 }
@@ -2624,6 +2968,16 @@ if (shapeBtn) {
     toggleShapeMenu(shapeBtn);
   });
   shapeBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
+if (rulerBtn) {
+  rulerBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleRuler();
+  });
+  rulerBtn.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
   });
 }
@@ -3045,6 +3399,8 @@ window.addEventListener('keydown', (e) => {
     setTool('lasso');
   } else if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.altKey) {
     setTool('shape');
+  } else if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.altKey) {
+    toggleRuler();
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
     if (selectedObjectIds && selectedObjectIds.size > 0) {
       e.preventDefault();
@@ -3140,13 +3496,60 @@ canvas.addEventListener('pointerdown', (e) => {
   if (isInteracting) return;
 
   const paperPt = getPaperPoint(e);
-  const { width: pWidth, height: pHeight } = getPageDimensions(pageConfig);
+  const isErasing = currentTool === 'eraser' || isPhysicalEraserTip(e);
 
+  // 1. Thước kẻ ảo (Ruler) xử lý trước nếu đang bật và không dùng đầu tẩy
+  if (isRulerActive && !isErasing) {
+    const rulerHit = hitTestRuler(paperPt);
+    if (rulerHit) {
+      e.preventDefault();
+      isInteracting = true;
+      activePointerId = e.pointerId;
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+
+      if (rulerHit.hit === 'rotate') {
+        activeInteractionType = 'ruler_rotate';
+        ruler.isRotating = true;
+        updateRulerAngleFromPointer(paperPt);
+        renderAll();
+        return;
+      }
+
+      if (rulerHit.hit === 'edge') {
+        deselectObjects();
+        activeInteractionType = 'ruler_draw';
+        const shapeType = (currentTool === 'shape' && (currentShapeType.startsWith('line_') || currentShapeType.startsWith('arrow_')))
+          ? currentShapeType
+          : 'line_solid';
+        currentRulerLine = {
+          edgeY: rulerHit.edgeY,
+          startLocalX: rulerHit.localPt.x,
+          endLocalX: rulerHit.localPt.x,
+          color: currentColor,
+          baseWidth: currentWidth,
+          shapeType: shapeType
+        };
+        renderAll();
+        return;
+      }
+
+      if (rulerHit.hit === 'body') {
+        activeInteractionType = 'ruler_move';
+        ruler.isMoving = true;
+        rulerDragOffset = {
+          dx: paperPt.x - ruler.cx,
+          dy: paperPt.y - ruler.cy
+        };
+        renderAll();
+        return;
+      }
+    }
+  }
+
+  const { width: pWidth, height: pHeight } = getPageDimensions(pageConfig);
   if (paperPt.x < 0 || paperPt.x > pWidth || paperPt.y < 0 || paperPt.y > pHeight) {
     return;
   }
-
-  const isErasing = currentTool === 'eraser' || isPhysicalEraserTip(e);
 
   e.preventDefault();
 
@@ -3287,7 +3690,21 @@ canvas.addEventListener('pointermove', (e) => {
 
   e.preventDefault();
 
-  if (activeInteractionType === 'eraser') {
+  if (activeInteractionType === 'ruler_rotate') {
+    const pt = getPaperPoint(e);
+    updateRulerAngleFromPointer(pt);
+    renderAll();
+  } else if (activeInteractionType === 'ruler_move') {
+    const pt = getPaperPoint(e);
+    ruler.cx = pt.x - rulerDragOffset.dx;
+    ruler.cy = pt.y - rulerDragOffset.dy;
+    renderAll();
+  } else if (activeInteractionType === 'ruler_draw' && currentRulerLine) {
+    const pt = getPaperPoint(e);
+    const localPt = paperToRulerLocal(pt.x, pt.y);
+    currentRulerLine.endLocalX = localPt.x;
+    renderAll();
+  } else if (activeInteractionType === 'eraser') {
     updateEraserCursorPosition(e.clientX, e.clientY);
     const events = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents().length > 0)
       ? e.getCoalescedEvents()
@@ -3519,6 +3936,41 @@ function handlePointerEnd(e) {
     manipulationSnapshots = null;
     manipulationInitialBounds = null;
     updateSelectionActionsUI();
+    renderAll();
+  } else if (activeInteractionType === 'ruler_draw') {
+    if (currentRulerLine) {
+      const p1 = rulerLocalToPaper(currentRulerLine.startLocalX, currentRulerLine.edgeY);
+      const p2 = rulerLocalToPaper(currentRulerLine.endLocalX, currentRulerLine.edgeY);
+      const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      if (dist >= 3) {
+        const newShape = createShapeObject({
+          shapeType: currentRulerLine.shapeType,
+          startPt: p1,
+          endPt: p2,
+          color: currentRulerLine.color,
+          baseWidth: currentRulerLine.baseWidth
+        });
+
+        executeAction({
+          type: 'add_shape',
+          shape: newShape,
+          do: () => {
+            pageObjects.push(newShape);
+          },
+          undo: () => {
+            const idx = pageObjects.indexOf(newShape);
+            if (idx !== -1) {
+              pageObjects.splice(idx, 1);
+            }
+          }
+        });
+      }
+      currentRulerLine = null;
+    }
+    renderAll();
+  } else if (activeInteractionType === 'ruler_move' || activeInteractionType === 'ruler_rotate') {
+    ruler.isMoving = false;
+    ruler.isRotating = false;
     renderAll();
   } else if (activeInteractionType === 'shape_draw') {
     if (currentShapeDrawing) {
