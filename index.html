@@ -170,6 +170,14 @@
             </svg>
           </button>
 
+          <!-- Nút chọn Hình học (S) -->
+          <button id="shapeBtn" class="tool-btn" title="Hình học cơ bản (S)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="8" cy="8" r="5"></circle>
+              <rect x="11" y="11" width="9" height="9" rx="1"></rect>
+            </svg>
+          </button>
+
           <div class="toolbar-divider"></div>
 
           <!-- Bảng 10 màu có sẵn -->
@@ -254,6 +262,108 @@
               <button class="bg-color-btn" data-bg="cream" style="--bg-c: #faf5eb;" title="Kem"></button>
               <button class="bg-color-btn" data-bg="gray" style="--bg-c: #e8eaed;" title="Xám nhạt"></button>
               <button class="bg-color-btn" data-bg="dark" style="--bg-c: #1e1f22;" title="Tối"></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Menu Popover Chọn Hình học Cơ bản -->
+        <div id="shapeMenu" class="shape-popover">
+          <div class="popover-section">
+            <div class="popover-title">Đường thẳng</div>
+            <div class="shape-grid">
+              <button class="shape-item-btn active" data-shape="line_solid" title="Đường thẳng (nét liền)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"></line></svg>
+                <span>Nét liền</span>
+              </button>
+              <button class="shape-item-btn" data-shape="line_dashed" title="Đường thẳng nét đứt">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="4,3"><line x1="3" y1="12" x2="21" y2="12"></line></svg>
+                <span>Nét đứt</span>
+              </button>
+              <button class="shape-item-btn" data-shape="line_dash_dot" title="Đường thẳng nét chấm gạch">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="6,2,2,2"><line x1="3" y1="12" x2="21" y2="12"></line></svg>
+                <span>Chấm gạch</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="popover-section">
+            <div class="popover-title">Mũi tên</div>
+            <div class="shape-grid">
+              <button class="shape-item-btn" data-shape="arrow_single" title="Mũi tên 1 đầu">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="3" y1="12" x2="19" y2="12"></line>
+                  <polyline points="14 7 19 12 14 17"></polyline>
+                </svg>
+                <span>1 đầu</span>
+              </button>
+              <button class="shape-item-btn" data-shape="arrow_double" title="Mũi tên 2 đầu">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                  <polyline points="9 8 5 12 9 16"></polyline>
+                  <polyline points="15 8 19 12 15 16"></polyline>
+                </svg>
+                <span>2 đầu</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="popover-section">
+            <div class="popover-title">Tròn & Elip</div>
+            <div class="shape-grid">
+              <button class="shape-item-btn" data-shape="circle" title="Hình tròn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
+                <span>Tròn</span>
+              </button>
+              <button class="shape-item-btn" data-shape="ellipse" title="Hình elip">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="12" rx="9" ry="6"></ellipse></svg>
+                <span>Elip</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="popover-section">
+            <div class="popover-title">Chữ nhật & Vuông</div>
+            <div class="shape-grid">
+              <button class="shape-item-btn" data-shape="rect" title="Hình chữ nhật">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="12" rx="1"></rect></svg>
+                <span>Chữ nhật</span>
+              </button>
+              <button class="shape-item-btn" data-shape="square" title="Hình vuông">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="1"></rect></svg>
+                <span>Vuông</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="popover-section">
+            <div class="popover-title">Tam giác</div>
+            <div class="shape-grid">
+              <button class="shape-item-btn" data-shape="triangle_arbitrary" title="Tam giác thường">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="9 4 3 20 21 20"></polygon></svg>
+                <span>Thường</span>
+              </button>
+              <button class="shape-item-btn" data-shape="triangle_isosceles" title="Tam giác cân">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 4 4 20 20 20"></polygon></svg>
+                <span>Cân</span>
+              </button>
+              <button class="shape-item-btn" data-shape="triangle_right" title="Tam giác vuông">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="5 4 5 20 20 20"></polygon></svg>
+                <span>Vuông</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="popover-section">
+            <div class="popover-title">Đa giác đều</div>
+            <div class="shape-grid">
+              <button class="shape-item-btn" data-shape="pentagon" title="Ngũ giác đều (5 cạnh)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 3 21 9.5 17.5 20 6.5 20 3 9.5"></polygon></svg>
+                <span>Ngũ giác</span>
+              </button>
+              <button class="shape-item-btn" data-shape="hexagon" title="Lục giác đều (6 cạnh)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 3 20 7.5 20 16.5 12 21 4 16.5 4 7.5"></polygon></svg>
+                <span>Lục giác</span>
+              </button>
             </div>
           </div>
         </div>

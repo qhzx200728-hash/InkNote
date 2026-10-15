@@ -1236,3 +1236,68 @@ html, body {
   background-color: #ffebe9;
   color: #cf222e;
 }
+
+/* Menu Popover Chọn Hình học Cơ bản */
+.shape-popover {
+  position: absolute;
+  top: 70px;
+  left: 120px;
+  background: #ffffff;
+  border: 1px solid #d0d7de;
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  z-index: 25;
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+  width: 290px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.shape-popover.open {
+  display: flex;
+}
+
+.shape-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 6px;
+}
+
+.shape-item-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 4px;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #24292f;
+  font-size: 11px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+  outline: none;
+}
+
+.shape-item-btn:hover {
+  background: #eef2f6;
+  border-color: #0969da;
+}
+
+.shape-item-btn.active {
+  background: #ddf4ff;
+  border-color: #0969da;
+  color: #0969da;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px #0969da;
+}
+
+.shape-item-btn svg {
+  width: 22px;
+  height: 22px;
+}

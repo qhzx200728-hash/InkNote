@@ -104,9 +104,15 @@ let panX = 0;
 let panY = 0;
 
 // Trạng thái công cụ
-let currentTool = 'pen'; // 'pen' | 'eraser' | 'lasso'
+let currentTool = 'pen'; // 'pen' | 'eraser' | 'lasso' | 'shape'
 let currentColor = '#1a1a1a';
 let currentWidth = 5;
+
+// Trạng thái Công cụ Hình học Cơ bản
+let shapeBtn = document.getElementById('shapeBtn');
+let shapeMenu = document.getElementById('shapeMenu');
+let currentShapeType = 'line_solid';
+let currentShapeDrawing = null;
 
 // Trạng thái Công cụ Lasso & Lựa chọn Đối tượng
 let lassoBtn = document.getElementById('lassoBtn');
@@ -838,8 +844,9 @@ function loadActivePageState() {
   for (const s of rawList) {
     const item = { ...s };
     if (!item.id) item.id = 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
-    if (!item.type) item.type = 'stroke';
-    if (!item.aabb) item.aabb = computeStrokeAABB(item);
+    if (!item.aabb) {
+      item.aabb = item.type === 'stroke' ? computeStrokeAABB(item) : computeShapeAABB(item);
+    }
     pageObjects.push(item);
   }
   strokes = pageObjects;
@@ -1125,6 +1132,7 @@ function setTool(tool) {
   if (penBtn) penBtn.classList.toggle('active', tool === 'pen');
   if (eraserBtn) eraserBtn.classList.toggle('active', tool === 'eraser');
   if (lassoBtn) lassoBtn.classList.toggle('active', tool === 'lasso');
+  if (shapeBtn) shapeBtn.classList.toggle('active', tool === 'shape');
 
   if (tool !== 'lasso') {
     deselectObjects();
@@ -1503,10 +1511,360 @@ function drawStroke(targetCtx, stroke) {
 // 10b. Hệ thống Đối tượng (Objects) & Công cụ Lasso
 // ==========================================
 
+function drawShape(targetCtx, shape) {
+  if (!shape || !shape.startPt || !shape.endPt) return;
+
+  targetCtx.save();
+  targetCtx.strokeStyle = shape.color || '#1a1a1a';
+  targetCtx.fillStyle = shape.color || '#1a1a1a';
+  targetCtx.lineWidth = Math.max(1, shape.baseWidth || 5);
+  targetCtx.lineCap = 'round';
+  targetCtx.lineJoin = 'round';
+
+  const { startPt, endPt, shapeType } = shape;
+  const bw = shape.baseWidth || 5;
+
+  // Cấu hình nét kẻ
+  if (shapeType === 'line_dashed') {
+    targetCtx.setLineDash([bw * 2.5, bw * 1.5]);
+  } else if (shapeType === 'line_dash_dot') {
+    targetCtx.setLineDash([bw * 3, bw * 1.2, bw * 0.8, bw * 1.2]);
+  } else {
+    targetCtx.setLineDash([]);
+  }
+
+  // 1. Đường thẳng (nét liền, nét đứt, nét chấm gạch)
+  if (shapeType.startsWith('line_')) {
+    targetCtx.beginPath();
+    targetCtx.moveTo(startPt.x, startPt.y);
+    targetCtx.lineTo(endPt.x, endPt.y);
+    targetCtx.stroke();
+  }
+  // 2. Mũi tên (1 đầu, 2 đầu)
+  else if (shapeType.startsWith('arrow_')) {
+    targetCtx.beginPath();
+    targetCtx.moveTo(startPt.x, startPt.y);
+    targetCtx.lineTo(endPt.x, endPt.y);
+    targetCtx.stroke();
+
+    const headLen = Math.max(12, bw * 3.5);
+    const arrowAngle = Math.PI / 6;
+
+    const angleEnd = Math.atan2(endPt.y - startPt.y, endPt.x - startPt.x);
+    targetCtx.setLineDash([]);
+    targetCtx.beginPath();
+    targetCtx.moveTo(endPt.x, endPt.y);
+    targetCtx.lineTo(
+      endPt.x - headLen * Math.cos(angleEnd - arrowAngle),
+      endPt.y - headLen * Math.sin(angleEnd - arrowAngle)
+    );
+    targetCtx.lineTo(
+      endPt.x - headLen * Math.cos(angleEnd + arrowAngle),
+      endPt.y - headLen * Math.sin(angleEnd + arrowAngle)
+    );
+    targetCtx.closePath();
+    targetCtx.fill();
+
+    if (shapeType === 'arrow_double') {
+      const angleStart = Math.atan2(startPt.y - endPt.y, startPt.x - endPt.x);
+      targetCtx.beginPath();
+      targetCtx.moveTo(startPt.x, startPt.y);
+      targetCtx.lineTo(
+        startPt.x - headLen * Math.cos(angleStart - arrowAngle),
+        startPt.y - headLen * Math.sin(angleStart - arrowAngle)
+      );
+      targetCtx.lineTo(
+        startPt.x - headLen * Math.cos(angleStart + arrowAngle),
+        startPt.y - headLen * Math.sin(angleStart + arrowAngle)
+      );
+      targetCtx.closePath();
+      targetCtx.fill();
+    }
+  }
+  // 3. Hình chữ nhật & Hình vuông
+  else if (shapeType === 'rect' || shapeType === 'square') {
+    const x = Math.min(startPt.x, endPt.x);
+    const y = Math.min(startPt.y, endPt.y);
+    const w = Math.abs(endPt.x - startPt.x);
+    const h = Math.abs(endPt.y - startPt.y);
+    targetCtx.beginPath();
+    targetCtx.strokeRect(x, y, w, h);
+  }
+  // 4. Hình tròn & Elip
+  else if (shapeType === 'circle') {
+    const cx = (startPt.x + endPt.x) / 2;
+    const cy = (startPt.y + endPt.y) / 2;
+    const r = Math.min(Math.abs(endPt.x - startPt.x), Math.abs(endPt.y - startPt.y)) / 2;
+    targetCtx.beginPath();
+    targetCtx.arc(cx, cy, Math.max(0.1, r), 0, Math.PI * 2);
+    targetCtx.stroke();
+  } else if (shapeType === 'ellipse') {
+    const cx = (startPt.x + endPt.x) / 2;
+    const cy = (startPt.y + endPt.y) / 2;
+    const rx = Math.max(0.1, Math.abs(endPt.x - startPt.x) / 2);
+    const ry = Math.max(0.1, Math.abs(endPt.y - startPt.y) / 2);
+    targetCtx.beginPath();
+    targetCtx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    targetCtx.stroke();
+  }
+  // 5. Tam giác (thường, cân, vuông)
+  else if (shapeType.startsWith('triangle_')) {
+    const minX = Math.min(startPt.x, endPt.x);
+    const maxX = Math.max(startPt.x, endPt.x);
+    const minY = Math.min(startPt.y, endPt.y);
+    const maxY = Math.max(startPt.y, endPt.y);
+
+    let v1, v2, v3;
+    if (shapeType === 'triangle_isosceles') {
+      v1 = { x: (minX + maxX) / 2, y: minY };
+      v2 = { x: minX, y: maxY };
+      v3 = { x: maxX, y: maxY };
+    } else if (shapeType === 'triangle_right') {
+      v1 = { x: minX, y: minY };
+      v2 = { x: minX, y: maxY };
+      v3 = { x: maxX, y: maxY };
+    } else {
+      v1 = { x: minX + (maxX - minX) * 0.35, y: minY };
+      v2 = { x: minX, y: maxY };
+      v3 = { x: maxX, y: maxY };
+    }
+
+    targetCtx.beginPath();
+    targetCtx.moveTo(v1.x, v1.y);
+    targetCtx.lineTo(v2.x, v2.y);
+    targetCtx.lineTo(v3.x, v3.y);
+    targetCtx.closePath();
+    targetCtx.stroke();
+  }
+  // 6. Ngũ giác & Lục giác (đều)
+  else if (shapeType === 'pentagon' || shapeType === 'hexagon') {
+    const cx = (startPt.x + endPt.x) / 2;
+    const cy = (startPt.y + endPt.y) / 2;
+    const r = Math.min(Math.abs(endPt.x - startPt.x), Math.abs(endPt.y - startPt.y)) / 2;
+    const sides = shapeType === 'pentagon' ? 5 : 6;
+    const startAngle = -Math.PI / 2;
+
+    targetCtx.beginPath();
+    for (let i = 0; i < sides; i++) {
+      const angle = startAngle + (i * 2 * Math.PI) / sides;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      if (i === 0) targetCtx.moveTo(x, y);
+      else targetCtx.lineTo(x, y);
+    }
+    targetCtx.closePath();
+    targetCtx.stroke();
+  }
+
+  targetCtx.restore();
+}
+
+function computeShapeAABB(shape) {
+  if (!shape || !shape.startPt || !shape.endPt) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  const { startPt, endPt, baseWidth = 5 } = shape;
+  const pad = Math.max(baseWidth * 2, 8);
+  const minX = Math.min(startPt.x, endPt.x) - pad;
+  const maxX = Math.max(startPt.x, endPt.x) + pad;
+  const minY = Math.min(startPt.y, endPt.y) - pad;
+  const maxY = Math.max(startPt.y, endPt.y) + pad;
+  return { minX, minY, maxX, maxY };
+}
+
+function createShapeObject({ shapeType, startPt, endPt, color, baseWidth }) {
+  const shape = {
+    id: 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+    type: 'shape',
+    shapeType: shapeType,
+    startPt: { x: startPt.x, y: startPt.y },
+    endPt: { x: endPt.x, y: endPt.y },
+    color: color || '#1a1a1a',
+    baseWidth: baseWidth || 5
+  };
+  shape.aabb = computeShapeAABB(shape);
+  return shape;
+}
+
+function getConstrainedEndPoint(shapeType, startPt, rawPt, shiftKey) {
+  const endPt = { x: rawPt.x, y: rawPt.y };
+
+  const isSquareMode = shapeType === 'square';
+  const isCircleMode = shapeType === 'circle';
+
+  // Đường thẳng hoặc mũi tên
+  if (shapeType.startsWith('line') || shapeType.startsWith('arrow')) {
+    if (shiftKey) {
+      const dx = endPt.x - startPt.x;
+      const dy = endPt.y - startPt.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0) {
+        const theta = Math.atan2(dy, dx);
+        const snapped = Math.round(theta / (Math.PI / 4)) * (Math.PI / 4);
+        endPt.x = startPt.x + dist * Math.cos(snapped);
+        endPt.y = startPt.y + dist * Math.sin(snapped);
+      }
+    }
+    return endPt;
+  }
+
+  // Hình vuông, hình tròn hoặc giữ Shift khi vẽ rect / ellipse
+  if (isSquareMode || isCircleMode || (shiftKey && (shapeType === 'rect' || shapeType === 'ellipse'))) {
+    const dx = endPt.x - startPt.x;
+    const dy = endPt.y - startPt.y;
+    const side = Math.max(Math.abs(dx), Math.abs(dy));
+    endPt.x = startPt.x + (dx >= 0 ? 1 : -1) * side;
+    endPt.y = startPt.y + (dy >= 0 ? 1 : -1) * side;
+    return endPt;
+  }
+
+  return endPt;
+}
+
+function getShapeSamplePoints(shape) {
+  const { startPt, endPt, shapeType } = shape;
+  const pts = [];
+  const minX = Math.min(startPt.x, endPt.x);
+  const maxX = Math.max(startPt.x, endPt.x);
+  const minY = Math.min(startPt.y, endPt.y);
+  const maxY = Math.max(startPt.y, endPt.y);
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  pts.push({ x: cx, y: cy });
+
+  if (shapeType.startsWith('line') || shapeType.startsWith('arrow')) {
+    pts.push({ x: startPt.x, y: startPt.y });
+    pts.push({ x: endPt.x, y: endPt.y });
+    pts.push({ x: (startPt.x + endPt.x) / 2, y: (startPt.y + endPt.y) / 2 });
+  } else if (shapeType === 'rect' || shapeType === 'square') {
+    pts.push({ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY });
+  } else if (shapeType === 'circle' || shapeType === 'ellipse') {
+    const rx = Math.abs(endPt.x - startPt.x) / 2;
+    const ry = Math.abs(endPt.y - startPt.y) / 2;
+    for (let i = 0; i < 8; i++) {
+      const a = (i * Math.PI) / 4;
+      pts.push({ x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) });
+    }
+  } else if (shapeType.startsWith('triangle')) {
+    if (shapeType === 'triangle_isosceles') {
+      pts.push({ x: cx, y: minY }, { x: minX, y: maxY }, { x: maxX, y: maxY });
+    } else if (shapeType === 'triangle_right') {
+      pts.push({ x: minX, y: minY }, { x: minX, y: maxY }, { x: maxX, y: maxY });
+    } else {
+      pts.push({ x: minX + (maxX - minX) * 0.35, y: minY }, { x: minX, y: maxY }, { x: maxX, y: maxY });
+    }
+  } else if (shapeType === 'pentagon' || shapeType === 'hexagon') {
+    const sides = shapeType === 'pentagon' ? 5 : 6;
+    const r = Math.min(maxX - minX, maxY - minY) / 2;
+    for (let i = 0; i < sides; i++) {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / sides;
+      pts.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+    }
+  }
+  return pts;
+}
+
+function isShapeHitByEraser(shape, eX, eY, rPaper) {
+  if (!shape.aabb) {
+    shape.aabb = computeShapeAABB(shape);
+  }
+
+  if (
+    eX + rPaper < shape.aabb.minX ||
+    eX - rPaper > shape.aabb.maxX ||
+    eY + rPaper < shape.aabb.minY ||
+    eY - rPaper > shape.aabb.maxY
+  ) {
+    return false;
+  }
+
+  const threshold = rPaper + (shape.baseWidth || 5) / 2;
+  const thresholdSq = threshold * threshold;
+  const { startPt, endPt, shapeType } = shape;
+  const minX = Math.min(startPt.x, endPt.x);
+  const maxX = Math.max(startPt.x, endPt.x);
+  const minY = Math.min(startPt.y, endPt.y);
+  const maxY = Math.max(startPt.y, endPt.y);
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  if (shapeType.startsWith('line') || shapeType.startsWith('arrow')) {
+    return distToSegmentSq(eX, eY, startPt.x, startPt.y, endPt.x, endPt.y) <= thresholdSq;
+  }
+
+  if (shapeType === 'rect' || shapeType === 'square') {
+    return (
+      distToSegmentSq(eX, eY, minX, minY, maxX, minY) <= thresholdSq ||
+      distToSegmentSq(eX, eY, maxX, minY, maxX, maxY) <= thresholdSq ||
+      distToSegmentSq(eX, eY, maxX, maxY, minX, maxY) <= thresholdSq ||
+      distToSegmentSq(eX, eY, minX, maxY, minX, minY) <= thresholdSq
+    );
+  }
+
+  if (shapeType === 'circle') {
+    const r = Math.min(maxX - minX, maxY - minY) / 2;
+    const distToCenter = Math.hypot(eX - cx, eY - cy);
+    return Math.abs(distToCenter - r) <= threshold;
+  }
+
+  if (shapeType === 'ellipse') {
+    const rx = (maxX - minX) / 2;
+    const ry = (maxY - minY) / 2;
+    for (let i = 0; i < 24; i++) {
+      const a = (i * Math.PI) / 12;
+      const px = cx + rx * Math.cos(a);
+      const py = cy + ry * Math.sin(a);
+      if (Math.hypot(eX - px, eY - py) <= threshold) return true;
+    }
+    return false;
+  }
+
+  if (shapeType.startsWith('triangle')) {
+    let v1, v2, v3;
+    if (shapeType === 'triangle_isosceles') {
+      v1 = { x: cx, y: minY };
+      v2 = { x: minX, y: maxY };
+      v3 = { x: maxX, y: maxY };
+    } else if (shapeType === 'triangle_right') {
+      v1 = { x: minX, y: minY };
+      v2 = { x: minX, y: maxY };
+      v3 = { x: maxX, y: maxY };
+    } else {
+      v1 = { x: minX + (maxX - minX) * 0.35, y: minY };
+      v2 = { x: minX, y: maxY };
+      v3 = { x: maxX, y: maxY };
+    }
+    return (
+      distToSegmentSq(eX, eY, v1.x, v1.y, v2.x, v2.y) <= thresholdSq ||
+      distToSegmentSq(eX, eY, v2.x, v2.y, v3.x, v3.y) <= thresholdSq ||
+      distToSegmentSq(eX, eY, v3.x, v3.y, v1.x, v1.y) <= thresholdSq
+    );
+  }
+
+  if (shapeType === 'pentagon' || shapeType === 'hexagon') {
+    const sides = shapeType === 'pentagon' ? 5 : 6;
+    const r = Math.min(maxX - minX, maxY - minY) / 2;
+    const pts = [];
+    for (let i = 0; i < sides; i++) {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / sides;
+      pts.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+    }
+    for (let i = 0; i < sides; i++) {
+      const p1 = pts[i];
+      const p2 = pts[(i + 1) % sides];
+      if (distToSegmentSq(eX, eY, p1.x, p1.y, p2.x, p2.y) <= thresholdSq) return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
 function drawObject(targetCtx, obj) {
   if (!obj) return;
   if (obj.type === 'stroke') {
     drawStroke(targetCtx, obj);
+  } else if (obj.type === 'shape') {
+    drawShape(targetCtx, obj);
   }
 }
 
@@ -1515,6 +1873,10 @@ function getObjectBounds(obj) {
   if (obj.aabb) return obj.aabb;
   if (obj.type === 'stroke') {
     obj.aabb = computeStrokeAABB(obj);
+    return obj.aabb;
+  }
+  if (obj.type === 'shape') {
+    obj.aabb = computeShapeAABB(obj);
     return obj.aabb;
   }
   if (obj.x !== undefined && obj.y !== undefined && obj.width !== undefined && obj.height !== undefined) {
@@ -1549,6 +1911,24 @@ function transformObject(obj, { dx = 0, dy = 0, scale = 1, originX = 0, originY 
       }));
     }
     obj.aabb = computeStrokeAABB(obj);
+  } else if (obj.type === 'shape') {
+    if (scale !== 1) {
+      obj.startPt = {
+        x: originX + (obj.startPt.x - originX) * scale + dx,
+        y: originY + (obj.startPt.y - originY) * scale + dy
+      };
+      obj.endPt = {
+        x: originX + (obj.endPt.x - originX) * scale + dx,
+        y: originY + (obj.endPt.y - originY) * scale + dy
+      };
+      obj.baseWidth = Math.max(1, (obj.baseWidth || 5) * scale);
+    } else {
+      obj.startPt.x += dx;
+      obj.startPt.y += dy;
+      obj.endPt.x += dx;
+      obj.endPt.y += dy;
+    }
+    obj.aabb = computeShapeAABB(obj);
   } else {
     if (obj.x !== undefined && obj.y !== undefined) {
       if (scale !== 1) {
@@ -1572,7 +1952,9 @@ function applyObjectSnapshots(snapshots) {
     const snap = map.get(pageObjects[i].id);
     if (snap) {
       pageObjects[i] = cloneObject(snap);
-      pageObjects[i].aabb = computeStrokeAABB(pageObjects[i]);
+      pageObjects[i].aabb = pageObjects[i].type === 'stroke'
+        ? computeStrokeAABB(pageObjects[i])
+        : computeShapeAABB(pageObjects[i]);
     }
   }
 }
@@ -1604,6 +1986,15 @@ function isObjectSelectedByLasso(obj, polygon) {
       }
     }
     return (insideCount / sampled) >= 0.5;
+  } else if (obj.type === 'shape') {
+    const pts = getShapeSamplePoints(obj);
+    let insideCount = 0;
+    for (const p of pts) {
+      if (isPointInPolygon(p.x, p.y, polygon)) {
+        insideCount++;
+      }
+    }
+    return (insideCount / pts.length) >= 0.5;
   } else {
     const b = getObjectBounds(obj);
     const cx = (b.minX + b.maxX) / 2;
@@ -1880,6 +2271,10 @@ function renderAll() {
 
   if (currentStroke) {
     drawStroke(ctx, currentStroke);
+  }
+
+  if (currentShapeDrawing) {
+    drawShape(ctx, currentShapeDrawing);
   }
 
   // 1. Đường khoanh nét đứt khi đang dùng Lasso
@@ -2220,6 +2615,19 @@ if (lassoBtn) {
   });
 }
 
+if (shapeBtn) {
+  shapeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (currentTool !== 'shape') {
+      setTool('shape');
+    }
+    toggleShapeMenu(shapeBtn);
+  });
+  shapeBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
 // Các nút trên thanh thao tác nổi cho vùng chọn Lasso
 if (selectionActions) {
   selectionActions.addEventListener('pointerdown', (e) => {
@@ -2430,6 +2838,46 @@ function checkStrokesOutsideBounds(limitWidth, limitHeight) {
   return false;
 }
 
+// Menu Popover Chọn Hình học Cơ bản
+function toggleShapeMenu(anchorEl = shapeBtn) {
+  if (!shapeMenu || !anchorEl) return;
+  const isOpen = shapeMenu.classList.contains('open');
+
+  if (isOpen) {
+    shapeMenu.classList.remove('open');
+  } else {
+    if (paperMenu) paperMenu.classList.remove('open');
+    if (backupMenu) backupMenu.classList.remove('open');
+    const rect = anchorEl.getBoundingClientRect();
+    const parentRect = canvas.getBoundingClientRect();
+    shapeMenu.style.top = `${rect.bottom - parentRect.top + 8}px`;
+    shapeMenu.style.left = `${Math.min(parentRect.width - 310, Math.max(10, rect.left - parentRect.left - 40))}px`;
+    shapeMenu.classList.add('open');
+  }
+}
+
+if (shapeMenu) {
+  shapeMenu.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+
+  shapeMenu.addEventListener('click', (e) => {
+    const btn = e.target.closest('.shape-item-btn');
+    if (!btn) return;
+    e.stopPropagation();
+
+    const shape = btn.getAttribute('data-shape');
+    if (shape) {
+      currentShapeType = shape;
+      shapeMenu.querySelectorAll('.shape-item-btn').forEach(b => {
+        b.classList.toggle('active', b === btn);
+      });
+      setTool('shape');
+      shapeMenu.classList.remove('open');
+    }
+  });
+}
+
 // Menu Sao lưu & Phục hồi
 function toggleBackupMenu(anchorEl = backupBtn) {
   if (!backupMenu || !anchorEl) return;
@@ -2520,6 +2968,11 @@ window.addEventListener('click', (e) => {
       paperMenu.classList.remove('open');
     }
   }
+  if (shapeMenu && shapeMenu.classList.contains('open')) {
+    if (!shapeMenu.contains(e.target) && (!shapeBtn || !shapeBtn.contains(e.target))) {
+      shapeMenu.classList.remove('open');
+    }
+  }
   if (backupMenu && backupMenu.classList.contains('open')) {
     if (!backupMenu.contains(e.target) && !backupBtn.contains(e.target) && (!notesBackupBtn || !notesBackupBtn.contains(e.target))) {
       backupMenu.classList.remove('open');
@@ -2560,9 +3013,21 @@ window.addEventListener('keydown', (e) => {
     hideMoveNoteDialog();
     hideDeleteFolderDialog();
     if (paperMenu) paperMenu.classList.remove('open');
+    if (shapeMenu) shapeMenu.classList.remove('open');
     if (backupMenu) backupMenu.classList.remove('open');
     deselectObjects();
     return;
+  }
+
+  if (e.key === 'Shift' && activeInteractionType === 'shape_draw' && currentShapeDrawing) {
+    currentShapeDrawing.shiftKey = true;
+    currentShapeDrawing.endPt = getConstrainedEndPoint(
+      currentShapeDrawing.shapeType,
+      currentShapeDrawing.startPt,
+      currentShapeDrawing.rawPt || currentShapeDrawing.endPt,
+      true
+    );
+    renderAll();
   }
 
   // Không nhận phím tắt vẽ khi đang ở màn hình danh sách
@@ -2578,6 +3043,8 @@ window.addEventListener('keydown', (e) => {
     setTool('eraser');
   } else if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.altKey) {
     setTool('lasso');
+  } else if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.altKey) {
+    setTool('shape');
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
     if (selectedObjectIds && selectedObjectIds.size > 0) {
       e.preventDefault();
@@ -2600,6 +3067,19 @@ window.addEventListener('keydown', (e) => {
   ) {
     e.preventDefault();
     redo();
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'Shift' && activeInteractionType === 'shape_draw' && currentShapeDrawing) {
+    currentShapeDrawing.shiftKey = false;
+    currentShapeDrawing.endPt = getConstrainedEndPoint(
+      currentShapeDrawing.shapeType,
+      currentShapeDrawing.startPt,
+      currentShapeDrawing.rawPt || currentShapeDrawing.endPt,
+      false
+    );
+    renderAll();
   }
 });
 
@@ -2730,6 +3210,26 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
+  if (currentTool === 'shape') {
+    deselectObjects();
+    isInteracting = true;
+    activePointerId = e.pointerId;
+    activeInteractionType = 'shape_draw';
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+
+    currentShapeDrawing = {
+      shapeType: currentShapeType,
+      startPt: { x: paperPt.x, y: paperPt.y },
+      endPt: { x: paperPt.x, y: paperPt.y },
+      rawPt: { x: paperPt.x, y: paperPt.y },
+      color: currentColor,
+      baseWidth: currentWidth,
+      shiftKey: !!e.shiftKey
+    };
+    renderAll();
+    return;
+  }
+
   // Chế độ Pen: nếu có vùng chọn đang mở thì bỏ chọn
   deselectObjects();
 
@@ -2758,7 +3258,10 @@ function checkAndEraseStrokes(paperX, paperY) {
 
   for (let i = pageObjects.length - 1; i >= 0; i--) {
     const s = pageObjects[i];
-    if (isStrokeHitByEraser(s, paperX, paperY, rPaper)) {
+    const isHit = s.type === 'stroke'
+      ? isStrokeHitByEraser(s, paperX, paperY, rPaper)
+      : isShapeHitByEraser(s, paperX, paperY, rPaper);
+    if (isHit) {
       erasedInCurrentDrag.push({ stroke: s, originalIndex: i });
       selectedObjectIds.delete(s.id);
       pageObjects.splice(i, 1);
@@ -2793,6 +3296,17 @@ canvas.addEventListener('pointermove', (e) => {
       const pt = getPaperPoint(ev);
       checkAndEraseStrokes(pt.x, pt.y);
     }
+  } else if (activeInteractionType === 'shape_draw' && currentShapeDrawing) {
+    const rawPt = getPaperPoint(e);
+    currentShapeDrawing.shiftKey = !!e.shiftKey;
+    currentShapeDrawing.rawPt = rawPt;
+    currentShapeDrawing.endPt = getConstrainedEndPoint(
+      currentShapeDrawing.shapeType,
+      currentShapeDrawing.startPt,
+      rawPt,
+      e.shiftKey
+    );
+    renderAll();
   } else if (activeInteractionType === 'lasso_draw') {
     const pt = getPaperPoint(e);
     if (!lassoPath) lassoPath = [];
@@ -2805,9 +3319,15 @@ canvas.addEventListener('pointermove', (e) => {
       const dy = paperPt.y - dragStartPaperPt.y;
       for (const snap of manipulationSnapshots) {
         const obj = pageObjects.find(o => o.id === snap.id);
-        if (obj && obj.type === 'stroke') {
-          obj.points = snap.points.map(p => ({ x: p.x + dx, y: p.y + dy, pressure: p.pressure }));
-          obj.aabb = computeStrokeAABB(obj);
+        if (obj) {
+          if (obj.type === 'stroke') {
+            obj.points = snap.points.map(p => ({ x: p.x + dx, y: p.y + dy, pressure: p.pressure }));
+            obj.aabb = computeStrokeAABB(obj);
+          } else if (obj.type === 'shape') {
+            obj.startPt = { x: snap.startPt.x + dx, y: snap.startPt.y + dy };
+            obj.endPt = { x: snap.endPt.x + dx, y: snap.endPt.y + dy };
+            obj.aabb = computeShapeAABB(obj);
+          }
         }
       }
       if (manipulationInitialBounds) {
@@ -2827,14 +3347,27 @@ canvas.addEventListener('pointermove', (e) => {
 
       for (const snap of manipulationSnapshots) {
         const obj = pageObjects.find(o => o.id === snap.id);
-        if (obj && obj.type === 'stroke') {
-          obj.points = snap.points.map(p => ({
-            x: ox + (p.x - ox) * scale,
-            y: oy + (p.y - oy) * scale,
-            pressure: p.pressure
-          }));
-          obj.baseWidth = Math.max(1, (snap.baseWidth || 5) * scale);
-          obj.aabb = computeStrokeAABB(obj);
+        if (obj) {
+          if (obj.type === 'stroke') {
+            obj.points = snap.points.map(p => ({
+              x: ox + (p.x - ox) * scale,
+              y: oy + (p.y - oy) * scale,
+              pressure: p.pressure
+            }));
+            obj.baseWidth = Math.max(1, (snap.baseWidth || 5) * scale);
+            obj.aabb = computeStrokeAABB(obj);
+          } else if (obj.type === 'shape') {
+            obj.startPt = {
+              x: ox + (snap.startPt.x - ox) * scale,
+              y: oy + (snap.startPt.y - oy) * scale
+            };
+            obj.endPt = {
+              x: ox + (snap.endPt.x - ox) * scale,
+              y: oy + (snap.endPt.y - oy) * scale
+            };
+            obj.baseWidth = Math.max(1, (snap.baseWidth || 5) * scale);
+            obj.aabb = computeShapeAABB(obj);
+          }
         }
       }
       selectionBounds = computeSelectionBounds();
@@ -2987,6 +3520,35 @@ function handlePointerEnd(e) {
     manipulationInitialBounds = null;
     updateSelectionActionsUI();
     renderAll();
+  } else if (activeInteractionType === 'shape_draw') {
+    if (currentShapeDrawing) {
+      const { startPt, endPt } = currentShapeDrawing;
+      const dist = Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y);
+      if (dist >= 3) {
+        const newShape = createShapeObject({
+          shapeType: currentShapeDrawing.shapeType,
+          startPt: { ...startPt },
+          endPt: { ...endPt },
+          color: currentShapeDrawing.color,
+          baseWidth: currentShapeDrawing.baseWidth
+        });
+
+        executeAction({
+          type: 'add_shape',
+          shape: newShape,
+          do: () => {
+            pageObjects.push(newShape);
+          },
+          undo: () => {
+            const idx = pageObjects.indexOf(newShape);
+            if (idx !== -1) {
+              pageObjects.splice(idx, 1);
+            }
+          }
+        });
+      }
+      currentShapeDrawing = null;
+    }
   } else if (currentStroke) {
     currentStroke.isFinished = true;
     currentStroke.aabb = computeStrokeAABB(currentStroke);
