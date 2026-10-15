@@ -137,6 +137,30 @@ let ruler = {
 let currentRulerLine = null;
 let rulerDragOffset = { dx: 0, dy: 0 };
 
+// Trạng thái Compa ảo (Virtual Compass)
+let compassBtn = document.getElementById('compassBtn');
+let isCompassActive = false;
+let compass = {
+  placed: false,
+  cx: 600,
+  cy: 700,
+  r: 4 * RULER_CM_UNIT,
+  angle: 0,
+  isMovingCenter: false,
+  isResizingRadius: false,
+  isDrawingArc: false
+};
+let currentArcDrawing = null;
+let compassDragOffset = { dx: 0, dy: 0 };
+let compassSnapIndicator = null;
+
+// Modal Bán kính Compa
+const compassRadiusModal = document.getElementById('compassRadiusModal');
+const compassRadiusForm = document.getElementById('compassRadiusForm');
+const compassRadiusInput = document.getElementById('compassRadiusInput');
+const closeCompassRadiusModalBtn = document.getElementById('closeCompassRadiusModalBtn');
+const cancelCompassRadiusBtn = document.getElementById('cancelCompassRadiusBtn');
+
 // Trạng thái Công cụ Lasso & Lựa chọn Đối tượng
 let lassoBtn = document.getElementById('lassoBtn');
 let selectionActions = document.getElementById('selectionActions');
@@ -774,7 +798,7 @@ async function openNote(noteId) {
         const item = { ...o };
         if (!item.id) item.id = 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
         if (!item.type) item.type = 'stroke';
-        if (!item.aabb) item.aabb = computeStrokeAABB(item);
+        if (!item.aabb) item.aabb = getObjectBounds(item);
         return item;
       });
 
@@ -868,7 +892,7 @@ function loadActivePageState() {
     const item = { ...s };
     if (!item.id) item.id = 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
     if (!item.aabb) {
-      item.aabb = item.type === 'stroke' ? computeStrokeAABB(item) : computeShapeAABB(item);
+      item.aabb = getObjectBounds(item);
     }
     pageObjects.push(item);
   }
@@ -1707,6 +1731,132 @@ function createShapeObject({ shapeType, startPt, endPt, color, baseWidth }) {
   return shape;
 }
 
+function computeArcAABB(arc) {
+  if (!arc || typeof arc.cx !== 'number' || typeof arc.cy !== 'number' || typeof arc.r !== 'number') {
+    return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  }
+  const pad = Math.max(2, (arc.baseWidth || 5) / 2);
+  if (arc.isFullCircle) {
+    return {
+      minX: arc.cx - arc.r - pad,
+      minY: arc.cy - arc.r - pad,
+      maxX: arc.cx + arc.r + pad,
+      maxY: arc.cy + arc.r + pad
+    };
+  }
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const N = 32;
+  const span = arc.endAngle - arc.startAngle;
+  for (let i = 0; i <= N; i++) {
+    const theta = arc.startAngle + (i / N) * span;
+    const x = arc.cx + arc.r * Math.cos(theta);
+    const y = arc.cy + arc.r * Math.sin(theta);
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return {
+    minX: minX - pad,
+    minY: minY - pad,
+    maxX: maxX + pad,
+    maxY: maxY + pad
+  };
+}
+
+function createArcObject({ cx, cy, r, startAngle, endAngle, isFullCircle, anticlockwise, color, baseWidth }) {
+  const arc = {
+    id: 'obj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+    type: 'arc',
+    cx: cx,
+    cy: cy,
+    r: r,
+    startAngle: startAngle,
+    endAngle: endAngle,
+    isFullCircle: !!isFullCircle,
+    anticlockwise: !!anticlockwise,
+    color: color || '#1a1a1a',
+    baseWidth: baseWidth || 5
+  };
+  arc.aabb = computeArcAABB(arc);
+  return arc;
+}
+
+function drawArcObject(targetCtx, arc) {
+  if (!arc || typeof arc.cx !== 'number' || typeof arc.cy !== 'number' || typeof arc.r !== 'number') return;
+  targetCtx.save();
+  targetCtx.strokeStyle = arc.color || '#1a1a1a';
+  targetCtx.lineWidth = Math.max(1, arc.baseWidth || 5);
+  targetCtx.lineCap = 'round';
+  targetCtx.lineJoin = 'round';
+
+  targetCtx.beginPath();
+  if (arc.isFullCircle) {
+    targetCtx.arc(arc.cx, arc.cy, arc.r, 0, Math.PI * 2, false);
+  } else {
+    targetCtx.arc(arc.cx, arc.cy, arc.r, arc.startAngle, arc.endAngle, !!arc.anticlockwise);
+  }
+  targetCtx.stroke();
+  targetCtx.restore();
+}
+
+function getArcSamplePoints(arc) {
+  const pts = [];
+  if (!arc) return pts;
+  const N = arc.isFullCircle ? 16 : 12;
+  const span = arc.isFullCircle ? (Math.PI * 2) : (arc.endAngle - arc.startAngle);
+  const start = arc.isFullCircle ? 0 : arc.startAngle;
+  for (let i = 0; i <= N; i++) {
+    const theta = start + (i / N) * span;
+    pts.push({
+      x: arc.cx + arc.r * Math.cos(theta),
+      y: arc.cy + arc.r * Math.sin(theta)
+    });
+  }
+  return pts;
+}
+
+function isArcHitByEraser(arc, eX, eY, rPaper) {
+  if (!arc.aabb) {
+    arc.aabb = computeArcAABB(arc);
+  }
+  if (
+    eX + rPaper < arc.aabb.minX ||
+    eX - rPaper > arc.aabb.maxX ||
+    eY + rPaper < arc.aabb.minY ||
+    eY - rPaper > arc.aabb.maxY
+  ) {
+    return false;
+  }
+
+  const dist = Math.hypot(eX - arc.cx, eY - arc.cy);
+  const threshold = rPaper + (arc.baseWidth || 5) / 2;
+  const radialDiff = Math.abs(dist - arc.r);
+
+  if (radialDiff > threshold) {
+    return false;
+  }
+
+  if (arc.isFullCircle) {
+    return true;
+  }
+
+  const p1 = { x: arc.cx + arc.r * Math.cos(arc.startAngle), y: arc.cy + arc.r * Math.sin(arc.startAngle) };
+  const p2 = { x: arc.cx + arc.r * Math.cos(arc.endAngle), y: arc.cy + arc.r * Math.sin(arc.endAngle) };
+  if (Math.hypot(eX - p1.x, eY - p1.y) <= threshold || Math.hypot(eX - p2.x, eY - p2.y) <= threshold) {
+    return true;
+  }
+
+  const eAngle = Math.atan2(eY - arc.cy, eX - arc.cx);
+  const diffStart = Math.atan2(Math.sin(eAngle - arc.startAngle), Math.cos(eAngle - arc.startAngle));
+  const totalSpan = arc.endAngle - arc.startAngle;
+  if (totalSpan > 0 && diffStart >= 0 && diffStart <= totalSpan) return true;
+  if (totalSpan < 0 && diffStart <= 0 && diffStart >= totalSpan) return true;
+
+  return false;
+}
+
 function getConstrainedEndPoint(shapeType, startPt, rawPt, shiftKey) {
   const endPt = { x: rawPt.x, y: rawPt.y };
 
@@ -1888,6 +2038,8 @@ function drawObject(targetCtx, obj) {
     drawStroke(targetCtx, obj);
   } else if (obj.type === 'shape') {
     drawShape(targetCtx, obj);
+  } else if (obj.type === 'arc') {
+    drawArcObject(targetCtx, obj);
   }
 }
 
@@ -1900,6 +2052,10 @@ function getObjectBounds(obj) {
   }
   if (obj.type === 'shape') {
     obj.aabb = computeShapeAABB(obj);
+    return obj.aabb;
+  }
+  if (obj.type === 'arc') {
+    obj.aabb = computeArcAABB(obj);
     return obj.aabb;
   }
   if (obj.x !== undefined && obj.y !== undefined && obj.width !== undefined && obj.height !== undefined) {
@@ -1952,6 +2108,17 @@ function transformObject(obj, { dx = 0, dy = 0, scale = 1, originX = 0, originY 
       obj.endPt.y += dy;
     }
     obj.aabb = computeShapeAABB(obj);
+  } else if (obj.type === 'arc') {
+    if (scale !== 1) {
+      obj.cx = originX + (obj.cx - originX) * scale + dx;
+      obj.cy = originY + (obj.cy - originY) * scale + dy;
+      obj.r = Math.max(1, obj.r * scale);
+      obj.baseWidth = Math.max(1, (obj.baseWidth || 5) * scale);
+    } else {
+      obj.cx += dx;
+      obj.cy += dy;
+    }
+    obj.aabb = computeArcAABB(obj);
   } else {
     if (obj.x !== undefined && obj.y !== undefined) {
       if (scale !== 1) {
@@ -1975,9 +2142,7 @@ function applyObjectSnapshots(snapshots) {
     const snap = map.get(pageObjects[i].id);
     if (snap) {
       pageObjects[i] = cloneObject(snap);
-      pageObjects[i].aabb = pageObjects[i].type === 'stroke'
-        ? computeStrokeAABB(pageObjects[i])
-        : computeShapeAABB(pageObjects[i]);
+      pageObjects[i].aabb = getObjectBounds(pageObjects[i]);
     }
   }
 }
@@ -2011,6 +2176,15 @@ function isObjectSelectedByLasso(obj, polygon) {
     return (insideCount / sampled) >= 0.5;
   } else if (obj.type === 'shape') {
     const pts = getShapeSamplePoints(obj);
+    let insideCount = 0;
+    for (const p of pts) {
+      if (isPointInPolygon(p.x, p.y, polygon)) {
+        insideCount++;
+      }
+    }
+    return (insideCount / pts.length) >= 0.5;
+  } else if (obj.type === 'arc') {
+    const pts = getArcSamplePoints(obj);
     let insideCount = 0;
     for (const p of pts) {
       if (isPointInPolygon(p.x, p.y, polygon)) {
@@ -2563,6 +2737,412 @@ function drawRuler(targetCtx) {
   targetCtx.restore();
 }
 
+// ==========================================
+// 10d. Công cụ Compa ảo (Virtual Compass)
+// ==========================================
+
+function toggleCompass() {
+  isCompassActive = !isCompassActive;
+  if (compassBtn) {
+    compassBtn.classList.toggle('active', isCompassActive);
+  }
+  if (!isCompassActive) {
+    compassSnapIndicator = null;
+    currentArcDrawing = null;
+    compass.isMovingCenter = false;
+    compass.isResizingRadius = false;
+    compass.isDrawingArc = false;
+    hideCompassRadiusModal();
+  }
+  renderAll();
+}
+
+function showCompassRadiusModal() {
+  if (!compassRadiusModal) return;
+  if (compassRadiusInput) {
+    compassRadiusInput.value = (compass.r / RULER_CM_UNIT).toFixed(1);
+  }
+  compassRadiusModal.style.display = 'flex';
+  setTimeout(() => {
+    if (compassRadiusInput) {
+      compassRadiusInput.focus();
+      compassRadiusInput.select();
+    }
+  }, 50);
+}
+
+function hideCompassRadiusModal() {
+  if (compassRadiusModal) {
+    compassRadiusModal.style.display = 'none';
+  }
+}
+
+function findSnapVertex(paperPt, snapRadiusScreen = 15) {
+  const snapDistPaper = snapRadiusScreen / zoom;
+  let closest = null;
+  let minDist = snapDistPaper;
+
+  for (const obj of pageObjects) {
+    const candidates = [];
+    if (obj.type === 'shape') {
+      if (obj.startPt) candidates.push(obj.startPt);
+      if (obj.endPt) candidates.push(obj.endPt);
+      const b = obj.aabb || computeShapeAABB(obj);
+      candidates.push({ x: b.minX, y: b.minY });
+      candidates.push({ x: b.maxX, y: b.minY });
+      candidates.push({ x: b.maxX, y: b.maxY });
+      candidates.push({ x: b.minX, y: b.maxY });
+    } else if (obj.type === 'arc') {
+      candidates.push({ x: obj.cx, y: obj.cy });
+      candidates.push({
+        x: obj.cx + obj.r * Math.cos(obj.startAngle),
+        y: obj.cy + obj.r * Math.sin(obj.startAngle)
+      });
+      candidates.push({
+        x: obj.cx + obj.r * Math.cos(obj.endAngle),
+        y: obj.cy + obj.r * Math.sin(obj.endAngle)
+      });
+    } else if (obj.type === 'stroke' && obj.points && obj.points.length > 0) {
+      candidates.push(obj.points[0]);
+      candidates.push(obj.points[obj.points.length - 1]);
+    }
+
+    for (const c of candidates) {
+      const d = Math.hypot(paperPt.x - c.x, paperPt.y - c.y);
+      if (d < minDist) {
+        minDist = d;
+        closest = { x: c.x, y: c.y, snapped: true };
+      }
+    }
+  }
+
+  return closest || { x: paperPt.x, y: paperPt.y, snapped: false };
+}
+
+function getCompassGeometry() {
+  const cx = compass.cx;
+  const cy = compass.cy;
+  const r = compass.r;
+  const theta = compass.angle;
+
+  const px = cx + r * Math.cos(theta);
+  const py = cy + r * Math.sin(theta);
+
+  const mx = (cx + px) / 2;
+  const my = (cy + py) / 2;
+
+  const H = Math.max(90, r * 0.85 + 35);
+  const nx = -Math.sin(theta);
+  const ny = Math.cos(theta);
+
+  const hx = mx + H * nx;
+  const hy = my + H * ny;
+
+  // Điểm nắm chỉnh bán kính trên chân bút chì (khoảng 65% từ khớp đỉnh xuống chân bút chì)
+  const rx = hx * 0.35 + px * 0.65;
+  const ry = hy * 0.35 + py * 0.65;
+
+  // Ô / badge hiển thị số bán kính (đặt lệch ra ngoài một chút gần chân bút chì)
+  const bx = px + (28 / zoom) * Math.cos(theta);
+  const by = py + (28 / zoom) * Math.sin(theta);
+
+  return { cx, cy, r, theta, px, py, mx, my, hx, hy, rx, ry, bx, by, H, nx, ny };
+}
+
+function hitTestCompass(paperPt) {
+  if (!isCompassActive || !compass.placed) return null;
+
+  const g = getCompassGeometry();
+
+  // 1. Điểm nắm đầu kim tại tâm (dời tâm)
+  const distNeedle = Math.hypot(paperPt.x - g.cx, paperPt.y - g.cy);
+  if (distNeedle <= Math.max(22 / zoom, 20)) {
+    return { hit: 'needle', geom: g };
+  }
+
+  // 2. Ô số bán kính (nhập số cm)
+  const distBadge = Math.hypot(paperPt.x - g.bx, paperPt.y - g.by);
+  if (distBadge <= Math.max(26 / zoom, 24)) {
+    return { hit: 'radius_badge', geom: g };
+  }
+
+  // 3. Chân bút chì (vẽ cung)
+  const distPencil = Math.hypot(paperPt.x - g.px, paperPt.y - g.py);
+  if (distPencil <= Math.max(24 / zoom, 22)) {
+    return { hit: 'pencil_tip', geom: g };
+  }
+
+  // 4. Điểm nắm đổi bán kính trên chân bút chì
+  const distRadius = Math.hypot(paperPt.x - g.rx, paperPt.y - g.ry);
+  if (distRadius <= Math.max(20 / zoom, 18)) {
+    return { hit: 'radius_handle', geom: g };
+  }
+
+  // 5. Khớp đỉnh / núm xoay đỉnh compa
+  const distHinge = Math.hypot(paperPt.x - g.hx, paperPt.y - g.hy);
+  if (distHinge <= Math.max(22 / zoom, 20)) {
+    return { hit: 'hinge', geom: g };
+  }
+
+  return null;
+}
+
+function updateArcDrawingFromPointer(paperPt) {
+  if (!currentArcDrawing) return;
+  const rawAngle = Math.atan2(paperPt.y - currentArcDrawing.cy, paperPt.x - currentArcDrawing.cx);
+
+  // Tính góc vi sai dTheta liên tục (unwrapped tracking, tránh lỗi nhảy góc khi qua ±180 độ)
+  const dTheta = Math.atan2(
+    Math.sin(rawAngle - currentArcDrawing.prevAngle),
+    Math.cos(rawAngle - currentArcDrawing.prevAngle)
+  );
+
+  currentArcDrawing.accumulatedDelta += dTheta;
+  currentArcDrawing.prevAngle = rawAngle;
+
+  compass.angle = rawAngle;
+
+  // Nếu quay đủ hoặc hơn 360 độ (2*PI) thì tự động khóa thành đường tròn đầy đủ
+  if (Math.abs(currentArcDrawing.accumulatedDelta) >= Math.PI * 2 - 0.05) {
+    currentArcDrawing.isFullCircle = true;
+    currentArcDrawing.startAngle = 0;
+    currentArcDrawing.endAngle = Math.PI * 2;
+    currentArcDrawing.anticlockwise = false;
+  } else {
+    currentArcDrawing.isFullCircle = false;
+    currentArcDrawing.endAngle = currentArcDrawing.startAngle + currentArcDrawing.accumulatedDelta;
+    currentArcDrawing.anticlockwise = currentArcDrawing.accumulatedDelta < 0;
+  }
+}
+
+function drawCompass(targetCtx) {
+  if (!isCompassActive) return;
+
+  targetCtx.save();
+
+  // Trường hợp đang mở compa bước đầu (kéo mở bán kính từ tâm)
+  if (!compass.placed) {
+    const cx = compass.cx, cy = compass.cy, r = compass.r;
+
+    // Vòng tròn nét đứt hướng dẫn
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.arc(cx, cy, r, 0, Math.PI * 2);
+    targetCtx.strokeStyle = 'rgba(9, 105, 218, 0.45)';
+    targetCtx.lineWidth = 1.5 / zoom;
+    targetCtx.setLineDash([5 / zoom, 5 / zoom]);
+    targetCtx.stroke();
+    targetCtx.restore();
+
+    // Đầu kim tâm
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.arc(cx, cy, 6 / zoom, 0, Math.PI * 2);
+    targetCtx.fillStyle = '#0969da';
+    targetCtx.fill();
+    targetCtx.restore();
+
+    // Điểm mút kéo
+    const px = cx + r * Math.cos(compass.angle);
+    const py = cy + r * Math.sin(compass.angle);
+
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.moveTo(cx, cy);
+    targetCtx.lineTo(px, py);
+    targetCtx.strokeStyle = '#0969da';
+    targetCtx.lineWidth = 1.8 / zoom;
+    targetCtx.stroke();
+
+    // Badge bán kính
+    const cm = (r / RULER_CM_UNIT).toFixed(1);
+    targetCtx.fillStyle = '#0969da';
+    targetCtx.font = `bold ${Math.max(10 / zoom, 12)}px sans-serif`;
+    targetCtx.textAlign = 'center';
+    targetCtx.textBaseline = 'bottom';
+    targetCtx.fillText(`${cm} cm`, (cx + px) / 2, (cy + py) / 2 - 8 / zoom);
+    targetCtx.restore();
+
+    targetCtx.restore();
+    return;
+  }
+
+  // Trường hợp compa 2 chân đã đặt trên trang
+  const g = getCompassGeometry();
+
+  // 1. Đường tròn chỉ dẫn mờ mờ cho bán kính hiện tại
+  targetCtx.save();
+  targetCtx.beginPath();
+  targetCtx.arc(g.cx, g.cy, g.r, 0, Math.PI * 2);
+  targetCtx.strokeStyle = 'rgba(9, 105, 218, 0.18)';
+  targetCtx.lineWidth = 1 / zoom;
+  targetCtx.setLineDash([4 / zoom, 6 / zoom]);
+  targetCtx.stroke();
+  targetCtx.restore();
+
+  // 2. Điểm bắt dính tâm (nếu đang hút vào một đỉnh)
+  if (compassSnapIndicator) {
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.arc(compassSnapIndicator.x, compassSnapIndicator.y, 14 / zoom, 0, Math.PI * 2);
+    targetCtx.strokeStyle = '#2da44e';
+    targetCtx.lineWidth = 2.5 / zoom;
+    targetCtx.stroke();
+    targetCtx.restore();
+  }
+
+  // 3. Vẽ hai chân Compa (Chân kim và Chân bút chì)
+  // Thanh giằng kim loại nối giữa hai chân
+  const brace1X = g.hx * 0.6 + g.cx * 0.4;
+  const brace1Y = g.hy * 0.6 + g.cy * 0.4;
+  const brace2X = g.hx * 0.6 + g.px * 0.4;
+  const brace2Y = g.hy * 0.6 + g.py * 0.4;
+
+  targetCtx.save();
+  targetCtx.beginPath();
+  targetCtx.moveTo(brace1X, brace1Y);
+  targetCtx.lineTo(brace2X, brace2Y);
+  targetCtx.strokeStyle = '#94a3b8';
+  targetCtx.lineWidth = 3.5 / zoom;
+  targetCtx.stroke();
+
+  // Ốc vặn chỉnh bán kính ở giữa thanh giằng
+  const midBraceX = (brace1X + brace2X) / 2;
+  const midBraceY = (brace1Y + brace2Y) / 2;
+  targetCtx.beginPath();
+  targetCtx.arc(midBraceX, midBraceY, 4.5 / zoom, 0, Math.PI * 2);
+  targetCtx.fillStyle = '#cbd5e1';
+  targetCtx.fill();
+  targetCtx.strokeStyle = '#475569';
+  targetCtx.lineWidth = 1 / zoom;
+  targetCtx.stroke();
+  targetCtx.restore();
+
+  // Chân kim (từ khớp đỉnh hx, hy đến tâm cx, cy)
+  targetCtx.save();
+  targetCtx.beginPath();
+  targetCtx.moveTo(g.hx, g.hy);
+  targetCtx.lineTo(g.cx, g.cy);
+  targetCtx.strokeStyle = '#475569';
+  targetCtx.lineWidth = 4 / zoom;
+  targetCtx.lineCap = 'round';
+  targetCtx.stroke();
+
+  // Chân bút chì (từ khớp đỉnh hx, hy đến ngòi bút px, py)
+  targetCtx.beginPath();
+  targetCtx.moveTo(g.hx, g.hy);
+  targetCtx.lineTo(g.px, g.py);
+  targetCtx.strokeStyle = '#475569';
+  targetCtx.lineWidth = 4 / zoom;
+  targetCtx.lineCap = 'round';
+  targetCtx.stroke();
+
+  // Ruột bút chì ở đoạn cuối chân bút chì
+  targetCtx.beginPath();
+  targetCtx.moveTo(g.hx * 0.2 + g.px * 0.8, g.hy * 0.2 + g.py * 0.8);
+  targetCtx.lineTo(g.px, g.py);
+  targetCtx.strokeStyle = currentColor || '#1a1a1a';
+  targetCtx.lineWidth = 5.5 / zoom;
+  targetCtx.stroke();
+  targetCtx.restore();
+
+  // 4. Khớp đỉnh compa và núm xoay (Hinge & Top Knob)
+  targetCtx.save();
+  const kx = g.hx + (20 / zoom) * g.nx;
+  const ky = g.hy + (20 / zoom) * g.ny;
+  targetCtx.beginPath();
+  targetCtx.moveTo(g.hx, g.hy);
+  targetCtx.lineTo(kx, ky);
+  targetCtx.strokeStyle = '#334155';
+  targetCtx.lineWidth = 4 / zoom;
+  targetCtx.stroke();
+
+  targetCtx.beginPath();
+  targetCtx.arc(kx, ky, 5.5 / zoom, 0, Math.PI * 2);
+  targetCtx.fillStyle = '#1e293b';
+  targetCtx.fill();
+
+  targetCtx.beginPath();
+  targetCtx.arc(g.hx, g.hy, 8 / zoom, 0, Math.PI * 2);
+  targetCtx.fillStyle = '#64748b';
+  targetCtx.fill();
+  targetCtx.strokeStyle = '#1e293b';
+  targetCtx.lineWidth = 1.5 / zoom;
+  targetCtx.stroke();
+  targetCtx.restore();
+
+  // 5. Điểm nắm đầu kim tại tâm (dời tâm)
+  targetCtx.save();
+  targetCtx.beginPath();
+  targetCtx.arc(g.cx, g.cy, 8 / zoom, 0, Math.PI * 2);
+  targetCtx.fillStyle = '#ffffff';
+  targetCtx.fill();
+  targetCtx.strokeStyle = '#0969da';
+  targetCtx.lineWidth = 2.5 / zoom;
+  targetCtx.stroke();
+
+  targetCtx.beginPath();
+  targetCtx.arc(g.cx, g.cy, 3 / zoom, 0, Math.PI * 2);
+  targetCtx.fillStyle = '#0969da';
+  targetCtx.fill();
+  targetCtx.restore();
+
+  // 6. Điểm nắm đổi bán kính (ở khoảng 65% chân bút chì)
+  targetCtx.save();
+  targetCtx.beginPath();
+  targetCtx.arc(g.rx, g.ry, 6.5 / zoom, 0, Math.PI * 2);
+  targetCtx.fillStyle = compass.isResizingRadius ? '#0969da' : '#ffffff';
+  targetCtx.fill();
+  targetCtx.strokeStyle = '#0969da';
+  targetCtx.lineWidth = 1.8 / zoom;
+  targetCtx.stroke();
+  targetCtx.restore();
+
+  // 7. Chân bút chì (ngòi vẽ)
+  targetCtx.save();
+  targetCtx.beginPath();
+  targetCtx.arc(g.px, g.py, 8 / zoom, 0, Math.PI * 2);
+  targetCtx.fillStyle = currentColor || '#1a1a1a';
+  targetCtx.fill();
+  targetCtx.strokeStyle = '#ffffff';
+  targetCtx.lineWidth = 2 / zoom;
+  targetCtx.stroke();
+  targetCtx.restore();
+
+  // 8. Badge bán kính & nút nhập số chính xác
+  const cm = (g.r / RULER_CM_UNIT).toFixed(1);
+  const badgeText = `${cm} cm`;
+  const fontSize = Math.max(10 / zoom, 12);
+  targetCtx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+
+  const textWidth = targetCtx.measureText(badgeText).width;
+  const pillW = textWidth + 24 / zoom;
+  const pillH = 24 / zoom;
+
+  targetCtx.save();
+  targetCtx.shadowColor = 'rgba(0,0,0,0.18)';
+  targetCtx.shadowBlur = 4 / zoom;
+  targetCtx.beginPath();
+  if (typeof targetCtx.roundRect === 'function') {
+    targetCtx.roundRect(g.bx - pillW / 2, g.by - pillH / 2, pillW, pillH, 6 / zoom);
+  } else {
+    targetCtx.rect(g.bx - pillW / 2, g.by - pillH / 2, pillW, pillH);
+  }
+  targetCtx.fillStyle = '#ffffff';
+  targetCtx.fill();
+  targetCtx.strokeStyle = '#0969da';
+  targetCtx.lineWidth = 1.2 / zoom;
+  targetCtx.stroke();
+
+  targetCtx.fillStyle = '#0969da';
+  targetCtx.textAlign = 'center';
+  targetCtx.textBaseline = 'middle';
+  targetCtx.fillText(badgeText, g.bx, g.by);
+  targetCtx.restore();
+
+  targetCtx.restore();
+}
+
 function renderAll() {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -2673,6 +3253,18 @@ function renderAll() {
       drawRulerLinePreview(ctx, currentRulerLine);
     }
     drawRuler(ctx);
+    ctx.restore();
+  }
+
+  // 4. Vẽ Compa ảo (Compass) & Cung tròn xem trước nếu đang bật Compa
+  if (isCompassActive) {
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(zoom, zoom);
+    if (currentArcDrawing) {
+      drawArcObject(ctx, currentArcDrawing);
+    }
+    drawCompass(ctx);
     ctx.restore();
   }
 
@@ -2979,6 +3571,44 @@ if (rulerBtn) {
   });
   rulerBtn.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
+  });
+}
+
+if (compassBtn) {
+  compassBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleCompass();
+  });
+  compassBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
+}
+
+if (compassRadiusForm) {
+  compassRadiusForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (compassRadiusInput) {
+      const val = parseFloat(compassRadiusInput.value);
+      if (!isNaN(val) && val >= 0.5 && val <= 35) {
+        compass.r = val * RULER_CM_UNIT;
+        renderAll();
+      }
+    }
+    hideCompassRadiusModal();
+  });
+}
+
+if (cancelCompassRadiusBtn) {
+  cancelCompassRadiusBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideCompassRadiusModal();
+  });
+}
+
+if (closeCompassRadiusModalBtn) {
+  closeCompassRadiusModalBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideCompassRadiusModal();
   });
 }
 
@@ -3366,6 +3996,7 @@ window.addEventListener('keydown', (e) => {
     hideNewFolderDialog();
     hideMoveNoteDialog();
     hideDeleteFolderDialog();
+    hideCompassRadiusModal();
     if (paperMenu) paperMenu.classList.remove('open');
     if (shapeMenu) shapeMenu.classList.remove('open');
     if (backupMenu) backupMenu.classList.remove('open');
@@ -3401,6 +4032,8 @@ window.addEventListener('keydown', (e) => {
     setTool('shape');
   } else if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.altKey) {
     toggleRuler();
+  } else if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.altKey) {
+    toggleCompass();
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
     if (selectedObjectIds && selectedObjectIds.size > 0) {
       e.preventDefault();
@@ -3546,6 +4179,87 @@ canvas.addEventListener('pointerdown', (e) => {
     }
   }
 
+  // 2. Compa ảo (Compass) xử lý trước nếu đang bật và không dùng đầu tẩy
+  if (isCompassActive && !isErasing) {
+    if (!compass.placed) {
+      e.preventDefault();
+      isInteracting = true;
+      activePointerId = e.pointerId;
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+
+      const snap = findSnapVertex(paperPt, 15);
+      compass.cx = snap.x;
+      compass.cy = snap.y;
+      compass.r = 10;
+      compass.angle = 0;
+      compassSnapIndicator = snap.snapped ? { x: snap.x, y: snap.y } : null;
+      activeInteractionType = 'compass_initial_open';
+      renderAll();
+      return;
+    } else {
+      const compHit = hitTestCompass(paperPt);
+      if (compHit) {
+        e.preventDefault();
+        isInteracting = true;
+        activePointerId = e.pointerId;
+        try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+
+        if (compHit.hit === 'radius_badge') {
+          showCompassRadiusModal();
+          isInteracting = false;
+          activePointerId = null;
+          return;
+        }
+
+        if (compHit.hit === 'needle') {
+          activeInteractionType = 'compass_move_center';
+          compass.isMovingCenter = true;
+          renderAll();
+          return;
+        }
+
+        if (compHit.hit === 'radius_handle') {
+          activeInteractionType = 'compass_resize_radius';
+          compass.isResizingRadius = true;
+          renderAll();
+          return;
+        }
+
+        if (compHit.hit === 'pencil_tip') {
+          deselectObjects();
+          activeInteractionType = 'compass_draw_arc';
+          compass.isDrawingArc = true;
+          const theta0 = Math.atan2(paperPt.y - compass.cy, paperPt.x - compass.cx);
+          currentArcDrawing = {
+            cx: compass.cx,
+            cy: compass.cy,
+            r: compass.r,
+            startAngle: theta0,
+            endAngle: theta0,
+            prevAngle: theta0,
+            accumulatedDelta: 0,
+            isFullCircle: false,
+            anticlockwise: false,
+            color: currentColor,
+            baseWidth: currentWidth
+          };
+          renderAll();
+          return;
+        }
+
+        if (compHit.hit === 'hinge') {
+          activeInteractionType = 'compass_move_all';
+          compassDragOffset = {
+            dx: paperPt.x - compass.cx,
+            dy: paperPt.y - compass.cy
+          };
+          renderAll();
+          return;
+        }
+      }
+    }
+  }
+
   const { width: pWidth, height: pHeight } = getPageDimensions(pageConfig);
   if (paperPt.x < 0 || paperPt.x > pWidth || paperPt.y < 0 || paperPt.y > pHeight) {
     return;
@@ -3663,7 +4377,9 @@ function checkAndEraseStrokes(paperX, paperY) {
     const s = pageObjects[i];
     const isHit = s.type === 'stroke'
       ? isStrokeHitByEraser(s, paperX, paperY, rPaper)
-      : isShapeHitByEraser(s, paperX, paperY, rPaper);
+      : (s.type === 'arc'
+          ? isArcHitByEraser(s, paperX, paperY, rPaper)
+          : isShapeHitByEraser(s, paperX, paperY, rPaper));
     if (isHit) {
       erasedInCurrentDrag.push({ stroke: s, originalIndex: i });
       selectedObjectIds.delete(s.id);
@@ -3703,6 +4419,34 @@ canvas.addEventListener('pointermove', (e) => {
     const pt = getPaperPoint(e);
     const localPt = paperToRulerLocal(pt.x, pt.y);
     currentRulerLine.endLocalX = localPt.x;
+    renderAll();
+  } else if (activeInteractionType === 'compass_initial_open') {
+    const pt = getPaperPoint(e);
+    const dist = Math.hypot(pt.x - compass.cx, pt.y - compass.cy);
+    compass.r = Math.max(10, dist);
+    compass.angle = Math.atan2(pt.y - compass.cy, pt.x - compass.cx);
+    renderAll();
+  } else if (activeInteractionType === 'compass_move_center') {
+    const pt = getPaperPoint(e);
+    const snap = findSnapVertex(pt, 15);
+    compass.cx = snap.x;
+    compass.cy = snap.y;
+    compassSnapIndicator = snap.snapped ? { x: snap.x, y: snap.y } : null;
+    renderAll();
+  } else if (activeInteractionType === 'compass_resize_radius') {
+    const pt = getPaperPoint(e);
+    const dist = Math.hypot(pt.x - compass.cx, pt.y - compass.cy);
+    compass.r = Math.max(10, dist);
+    compass.angle = Math.atan2(pt.y - compass.cy, pt.x - compass.cx);
+    renderAll();
+  } else if (activeInteractionType === 'compass_draw_arc') {
+    const pt = getPaperPoint(e);
+    updateArcDrawingFromPointer(pt);
+    renderAll();
+  } else if (activeInteractionType === 'compass_move_all') {
+    const pt = getPaperPoint(e);
+    compass.cx = pt.x - compassDragOffset.dx;
+    compass.cy = pt.y - compassDragOffset.dy;
     renderAll();
   } else if (activeInteractionType === 'eraser') {
     updateEraserCursorPosition(e.clientX, e.clientY);
@@ -3744,6 +4488,10 @@ canvas.addEventListener('pointermove', (e) => {
             obj.startPt = { x: snap.startPt.x + dx, y: snap.startPt.y + dy };
             obj.endPt = { x: snap.endPt.x + dx, y: snap.endPt.y + dy };
             obj.aabb = computeShapeAABB(obj);
+          } else if (obj.type === 'arc') {
+            obj.cx = snap.cx + dx;
+            obj.cy = snap.cy + dy;
+            obj.aabb = computeArcAABB(obj);
           }
         }
       }
@@ -3784,6 +4532,12 @@ canvas.addEventListener('pointermove', (e) => {
             };
             obj.baseWidth = Math.max(1, (snap.baseWidth || 5) * scale);
             obj.aabb = computeShapeAABB(obj);
+          } else if (obj.type === 'arc') {
+            obj.cx = ox + (snap.cx - ox) * scale;
+            obj.cy = oy + (snap.cy - oy) * scale;
+            obj.r = Math.max(1, snap.r * scale);
+            obj.baseWidth = Math.max(1, (snap.baseWidth || 5) * scale);
+            obj.aabb = computeArcAABB(obj);
           }
         }
       }
@@ -3971,6 +4725,53 @@ function handlePointerEnd(e) {
   } else if (activeInteractionType === 'ruler_move' || activeInteractionType === 'ruler_rotate') {
     ruler.isMoving = false;
     ruler.isRotating = false;
+    renderAll();
+  } else if (activeInteractionType === 'compass_initial_open') {
+    if (compass.r < 15) {
+      compass.r = 3.5 * RULER_CM_UNIT;
+    }
+    compass.placed = true;
+    compassSnapIndicator = null;
+    renderAll();
+  } else if (activeInteractionType === 'compass_move_center') {
+    compass.isMovingCenter = false;
+    compassSnapIndicator = null;
+    renderAll();
+  } else if (activeInteractionType === 'compass_resize_radius') {
+    compass.isResizingRadius = false;
+    renderAll();
+  } else if (activeInteractionType === 'compass_move_all') {
+    renderAll();
+  } else if (activeInteractionType === 'compass_draw_arc') {
+    compass.isDrawingArc = false;
+    if (currentArcDrawing && Math.abs(currentArcDrawing.accumulatedDelta) > 0.03) {
+      const newArc = createArcObject({
+        cx: currentArcDrawing.cx,
+        cy: currentArcDrawing.cy,
+        r: currentArcDrawing.r,
+        startAngle: currentArcDrawing.startAngle,
+        endAngle: currentArcDrawing.endAngle,
+        isFullCircle: currentArcDrawing.isFullCircle,
+        anticlockwise: currentArcDrawing.anticlockwise,
+        color: currentArcDrawing.color,
+        baseWidth: currentArcDrawing.baseWidth
+      });
+
+      executeAction({
+        type: 'add_arc',
+        arc: newArc,
+        do: () => {
+          pageObjects.push(newArc);
+        },
+        undo: () => {
+          const idx = pageObjects.indexOf(newArc);
+          if (idx !== -1) {
+            pageObjects.splice(idx, 1);
+          }
+        }
+      });
+    }
+    currentArcDrawing = null;
     renderAll();
   } else if (activeInteractionType === 'shape_draw') {
     if (currentShapeDrawing) {
